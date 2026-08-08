@@ -5,6 +5,7 @@ from src.marketplace.application.ports import (
     MatchingPolicy,
     OpportunityAccessRepository,
     OpportunityInvitationRepository,
+    OpportunityInterestRepository,
     OpportunityRepository,
     ProviderRepository,
     ProviderServiceRepository,
@@ -17,6 +18,7 @@ from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
     OpportunityInvitation,
+    OpportunityInterest,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -665,3 +667,52 @@ class DistributeOpportunity:
             granted_invitations.append(invitation)
 
         return granted_invitations
+
+
+class RegisterOpportunityInterest:
+    def __init__(
+        self,
+        opportunity_repository: OpportunityRepository,
+        provider_repository: ProviderRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
+        opportunity_interest_repository: OpportunityInterestRepository,
+    ):
+        self.opportunity_repository = opportunity_repository
+        self.provider_repository = provider_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
+        self.opportunity_interest_repository = opportunity_interest_repository
+
+    def execute(
+        self,
+        *,
+        invitation_id: UUID,
+    ) -> OpportunityInterest:
+        if invitation_id is None or not isinstance(invitation_id, UUID):
+            raise ValueError("Invitation id is required and must be a UUID instance.")
+
+        invitation = self.opportunity_invitation_repository.get_by_id(invitation_id)
+        if invitation is None:
+            raise ValueError("OpportunityInvitation does not exist.")
+
+        opportunity = self.opportunity_repository.get_by_id(invitation.opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        provider = self.provider_repository.get_by_id(invitation.provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        existing = self.opportunity_interest_repository.get_by_invitation(invitation_id)
+        if existing is not None:
+            raise ValueError("OpportunityInterest already exists for this invitation.")
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self.opportunity_interest_repository.save(interest)

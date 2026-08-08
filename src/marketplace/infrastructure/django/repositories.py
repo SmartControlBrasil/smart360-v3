@@ -3,6 +3,7 @@ from uuid import UUID
 from src.marketplace.application.ports import (
     OpportunityAccessRepository,
     OpportunityInvitationRepository,
+    OpportunityInterestRepository,
     OpportunityRepository,
     ProviderRepository,
     ProviderServiceRepository,
@@ -14,6 +15,7 @@ from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
     OpportunityInvitation,
+    OpportunityInterest,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -25,6 +27,7 @@ from src.marketplace.domain.entities import (
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
     OpportunityInvitationModel,
+    OpportunityInterestModel,
     OpportunityModel,
     ProviderModel,
     ProviderServiceModel,
@@ -531,3 +534,37 @@ class DjangoOpportunityInvitationRepository(OpportunityInvitationRepository):
         return OpportunityInvitationModel.objects.filter(
             opportunity_id=opportunity_id,
         ).count()
+
+
+class DjangoOpportunityInterestRepository(OpportunityInterestRepository):
+    @staticmethod
+    def _to_entity(model: OpportunityInterestModel) -> OpportunityInterest:
+        return OpportunityInterest(
+            id=model.id,
+            invitation_id=model.invitation_id,
+            created_at=model.created_at,
+        )
+
+    def save(self, interest: OpportunityInterest) -> OpportunityInterest:
+        model, _ = OpportunityInterestModel.objects.update_or_create(
+            id=interest.id,
+            defaults={
+                "invitation_id": interest.invitation_id,
+                "created_at": interest.created_at,
+            },
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, interest_id: UUID) -> OpportunityInterest | None:
+        try:
+            model = OpportunityInterestModel.objects.get(id=interest_id)
+        except OpportunityInterestModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def get_by_invitation(self, invitation_id: UUID) -> OpportunityInterest | None:
+        try:
+            model = OpportunityInterestModel.objects.get(invitation_id=invitation_id)
+        except OpportunityInterestModel.DoesNotExist:
+            return None
+        return self._to_entity(model)

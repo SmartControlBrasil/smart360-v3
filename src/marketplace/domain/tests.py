@@ -8,6 +8,7 @@ from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
     OpportunityInvitation,
+    OpportunityInterest,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -839,5 +840,51 @@ class OpportunityInvitationDomainTests(SimpleTestCase):
                 id=uuid4(),
                 opportunity_id=uuid4(),
                 provider_id=uuid4(),
+                created_at=datetime.now(),
+            )
+
+
+class OpportunityInterestDomainTests(SimpleTestCase):
+    def test_valid_opportunity_interest_accepted(self):
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=uuid4(),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.assertIsNotNone(interest.id)
+
+    def test_invalid_id_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInterest(
+                id=None,
+                invitation_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            OpportunityInterest(
+                id="invalid-uuid",
+                invitation_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_invalid_invitation_id_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInterest(
+                id=uuid4(),
+                invitation_id=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            OpportunityInterest(
+                id=uuid4(),
+                invitation_id="invalid-uuid",
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_naive_created_at_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInterest(
+                id=uuid4(),
+                invitation_id=uuid4(),
                 created_at=datetime.now(),
             )

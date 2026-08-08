@@ -15,6 +15,7 @@ from src.marketplace.application.use_cases import (
     DistributeOpportunity,
     GrantOpportunityAccess,
     InviteProviderToOpportunity,
+    RegisterOpportunityInterest,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
@@ -22,6 +23,7 @@ from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
     OpportunityInvitation,
+    OpportunityInterest,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -886,6 +888,28 @@ class InMemoryOpportunityInvitationRepository:
 
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         return len(self.list_by_opportunity(opportunity_id))
+
+
+class InMemoryOpportunityInterestRepository:
+    def __init__(self):
+        self._items: dict[str, OpportunityInterest] = {}
+        self.save_calls = 0
+        self.last_saved: OpportunityInterest | None = None
+
+    def save(self, interest: OpportunityInterest) -> OpportunityInterest:
+        self.save_calls += 1
+        self.last_saved = interest
+        self._items[str(interest.id)] = interest
+        return interest
+
+    def get_by_id(self, interest_id: UUID) -> OpportunityInterest | None:
+        return self._items.get(str(interest_id))
+
+    def get_by_invitation(self, invitation_id: UUID) -> OpportunityInterest | None:
+        for item in self._items.values():
+            if item.invitation_id == invitation_id:
+                return item
+        return None
 
 
 class CreateProviderServiceTests(SimpleTestCase):
@@ -2619,6 +2643,291 @@ class InviteProviderToOpportunityTests(SimpleTestCase):
         self.assertEqual(invitation.provider_id, provider.id)
         self.assertIsNotNone(invitation.id)
         self.assertIsNotNone(invitation.created_at.tzinfo)
+
+
+class RegisterOpportunityInterestTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        service_id: UUID,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=service_id,
+            title="Demanda tecnica",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _opportunity(
+        opportunity_id: UUID,
+        *,
+        service_request_id: UUID,
+        status: OpportunityStatus = OpportunityStatus.OPEN,
+    ) -> Opportunity:
+        now = datetime.now(timezone.utc)
+        return Opportunity(
+            id=opportunity_id,
+            service_request_id=service_request_id,
+            status=status,
+            max_accesses=3,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider",
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_invalid_invitation_id_rejected(self):
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id=None)
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id="invalid-uuid")
+
+    def test_nonexistent_invitation_rejected(self):
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id=uuid4())
+
+    def test_valid_invitation_creates_interest(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        interest = use_case.execute(invitation_id=invitation.id)
+
+        self.assertIsNotNone(interest.id)
+        self.assertEqual(interest.invitation_id, invitation.id)
+        self.assertIsNotNone(interest.created_at.tzinfo)
+
+    def test_duplicate_interest_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        int_repo.save(
+            OpportunityInterest(
+                id=uuid4(),
+                invitation_id=invitation.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id=invitation.id)
+
+    def test_closed_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CLOSED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id=invitation.id)
+
+    def test_cancelled_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CANCELLED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id=invitation.id)
+
+    def test_inactive_provider_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4(), is_active=False)
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(invitation_id=invitation.id)
+
+    def test_critical_semantic_separation(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        use_case = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        interest = use_case.execute(invitation_id=invitation.id)
+
+        self.assertIsNotNone(interest)
+        self.assertEqual(interest.invitation_id, invitation.id)
+        self.assertEqual(len(access_repo._items), 0)
 
 
 class TechnicalMatchingPolicyV1Tests(SimpleTestCase):

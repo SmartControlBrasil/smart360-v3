@@ -269,3 +269,20 @@ class OpportunityInvitationModel(models.Model):
                 name="mkt_opp_inv_uniq",
             ),
         ]
+
+
+class OpportunityInterestModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    invitation = models.OneToOneField(
+        OpportunityInvitationModel,
+        on_delete=models.PROTECT,
+        related_name="interest",
+    )
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_opportunity_interests"

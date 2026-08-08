@@ -317,3 +317,20 @@ class OpportunityInvitation:
             raise ValueError("OpportunityInvitation created_at must be a datetime instance.")
         if self.created_at.tzinfo is None:
             raise ValueError("OpportunityInvitation created_at must be timezone-aware.")
+
+
+@dataclass(slots=True)
+class OpportunityInterest:
+    id: UUID
+    invitation_id: UUID
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.id is None or not isinstance(self.id, UUID):
+            raise ValueError("OpportunityInterest id must be a valid UUID instance.")
+        if self.invitation_id is None or not isinstance(self.invitation_id, UUID):
+            raise ValueError("OpportunityInterest invitation_id must be a valid UUID instance.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("OpportunityInterest created_at must be a datetime instance.")
+        if self.created_at.tzinfo is None:
+            raise ValueError("OpportunityInterest created_at must be timezone-aware.")

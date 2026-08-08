@@ -6,6 +6,7 @@ from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
     OpportunityInvitation,
+    OpportunityInterest,
     Provider,
     ProviderService,
     Service,
@@ -221,4 +222,24 @@ class OpportunityInvitationRepository(Protocol):
         ...
 
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
+        ...
+
+
+class OpportunityInterestRepository(Protocol):
+    def save(
+        self,
+        interest: OpportunityInterest,
+    ) -> OpportunityInterest:
+        ...
+
+    def get_by_id(
+        self,
+        interest_id: UUID,
+    ) -> OpportunityInterest | None:
+        ...
+
+    def get_by_invitation(
+        self,
+        invitation_id: UUID,
+    ) -> OpportunityInterest | None:
         ...
