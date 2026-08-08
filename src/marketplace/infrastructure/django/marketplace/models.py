@@ -93,3 +93,43 @@ class ProviderModel(models.Model):
 
     def __str__(self):
         return self.display_name
+
+
+class ProviderServiceModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    provider = models.ForeignKey(
+        ProviderModel,
+        on_delete=models.PROTECT,
+        related_name="provider_services",
+    )
+    service = models.ForeignKey(
+        ServiceModel,
+        on_delete=models.PROTECT,
+        related_name="provider_services",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_provider_services"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "service"],
+                name="mkt_prv_srv_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["provider", "is_active"],
+                name="mkt_ps_prv_act_idx",
+            ),
+            models.Index(
+                fields=["service", "is_active"],
+                name="mkt_ps_srv_act_idx",
+            ),
+        ]

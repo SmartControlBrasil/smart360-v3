@@ -3,6 +3,7 @@ from uuid import UUID
 
 from src.marketplace.domain.entities import (
     Provider,
+    ProviderService,
     Service,
     ServiceCategory,
 )
@@ -63,4 +64,37 @@ class ProviderRepository(Protocol):
         self,
         organization_id: UUID,
     ) -> list[Provider]:
+        ...
+
+
+class ProviderServiceRepository(Protocol):
+    def save(
+        self,
+        provider_service: ProviderService,
+    ) -> ProviderService:
+        ...
+
+    def get_by_id(
+        self,
+        provider_service_id: UUID,
+    ) -> ProviderService | None:
+        ...
+
+    def get_by_provider_and_service(
+        self,
+        provider_id: UUID,
+        service_id: UUID,
+    ) -> ProviderService | None:
+        ...
+
+    def list_active_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[ProviderService]:
+        ...
+
+    def list_active_by_service(
+        self,
+        service_id: UUID,
+    ) -> list[ProviderService]:
         ...

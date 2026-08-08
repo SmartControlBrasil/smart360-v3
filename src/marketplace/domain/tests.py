@@ -5,6 +5,7 @@ from django.test import SimpleTestCase
 
 from src.marketplace.domain.entities import (
     Provider,
+    ProviderService,
     Service,
     ServiceCategory,
 )
@@ -242,3 +243,77 @@ class ProviderDomainTests(SimpleTestCase):
 
         provider.activate()
         self.assertTrue(provider.is_active)
+
+
+class ProviderServiceDomainTests(SimpleTestCase):
+    def test_valid_creation(self):
+        provider_service = ProviderService(
+            id=uuid4(),
+            provider_id=uuid4(),
+            service_id=uuid4(),
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.assertTrue(provider_service.is_active)
+
+    def test_provider_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ProviderService(
+                id=uuid4(),
+                provider_id=None,
+                service_id=uuid4(),
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_provider_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ProviderService(
+                id=uuid4(),
+                provider_id="invalid-uuid",
+                service_id=uuid4(),
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_service_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ProviderService(
+                id=uuid4(),
+                provider_id=uuid4(),
+                service_id=None,
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_service_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ProviderService(
+                id=uuid4(),
+                provider_id=uuid4(),
+                service_id="invalid-uuid",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_activate_and_deactivate(self):
+        provider_service = ProviderService(
+            id=uuid4(),
+            provider_id=uuid4(),
+            service_id=uuid4(),
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        provider_service.deactivate()
+        self.assertFalse(provider_service.is_active)
+
+        provider_service.activate()
+        self.assertTrue(provider_service.is_active)

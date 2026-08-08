@@ -5,11 +5,13 @@ from django.test import SimpleTestCase
 
 from src.marketplace.application.use_cases import (
     CreateProvider,
+    CreateProviderService,
     CreateService,
     CreateServiceCategory,
 )
 from src.marketplace.domain.entities import (
     Provider,
+    ProviderService,
     Service,
     ServiceCategory,
 )
@@ -640,3 +642,363 @@ class CreateProviderTests(SimpleTestCase):
                 display_name="Segundo",
                 slug="acme-automacao",
             )
+
+
+class InMemoryProviderServiceRepository:
+    def __init__(self):
+        self._items: dict[str, ProviderService] = {}
+        self.save_calls = 0
+        self.last_saved: ProviderService | None = None
+
+    def save(
+        self,
+        provider_service: ProviderService,
+    ) -> ProviderService:
+        self.save_calls += 1
+        self.last_saved = provider_service
+        self._items[str(provider_service.id)] = provider_service
+        return provider_service
+
+    def get_by_id(
+        self,
+        provider_service_id: UUID,
+    ) -> ProviderService | None:
+        return self._items.get(str(provider_service_id))
+
+    def get_by_provider_and_service(
+        self,
+        provider_id: UUID,
+        service_id: UUID,
+    ) -> ProviderService | None:
+        for item in self._items.values():
+            if item.provider_id == provider_id and item.service_id == service_id:
+                return item
+        return None
+
+    def list_active_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[ProviderService]:
+        return [
+            item
+            for item in self._items.values()
+            if item.provider_id == provider_id and item.is_active
+        ]
+
+    def list_active_by_service(
+        self,
+        service_id: UUID,
+    ) -> list[ProviderService]:
+        return [
+            item
+            for item in self._items.values()
+            if item.service_id == service_id and item.is_active
+        ]
+
+
+class CreateProviderServiceTests(SimpleTestCase):
+    @staticmethod
+    def _active_provider(provider_id: UUID, organization_id: UUID) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=organization_id,
+            display_name="Provider",
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _active_service(service_id: UUID, category_id: UUID) -> Service:
+        now = datetime.now(timezone.utc)
+        return Service(
+            id=service_id,
+            category_id=category_id,
+            name="Service",
+            slug=f"service-{service_id}",
+            description="desc",
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_valid_creation(self):
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+
+        provider = self._active_provider(uuid4(), uuid4())
+        service = self._active_service(uuid4(), uuid4())
+        provider_repository.save(provider)
+        service_repository.save(service)
+
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        created = use_case.execute(
+            provider_id=provider.id,
+            service_id=service.id,
+        )
+
+        self.assertIsInstance(created.id, UUID)
+        self.assertTrue(created.is_active)
+        self.assertEqual(created.provider_id, provider.id)
+        self.assertEqual(created.service_id, service.id)
+        self.assertIsNotNone(created.created_at.tzinfo)
+        self.assertIsNotNone(created.updated_at.tzinfo)
+        self.assertEqual(provider_service_repository.save_calls, 1)
+        self.assertIsNotNone(provider_service_repository.last_saved)
+
+    def test_provider_id_none_rejected_before_repositories(self):
+        class SpyProviderRepository(InMemoryProviderRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, provider_id: UUID) -> Provider | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(provider_id)
+
+        class SpyServiceRepository(InMemoryServiceRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, service_id: UUID) -> Service | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(service_id)
+
+        class SpyProviderServiceRepository(InMemoryProviderServiceRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_pair_calls = 0
+
+            def get_by_provider_and_service(
+                self,
+                provider_id: UUID,
+                service_id: UUID,
+            ) -> ProviderService | None:
+                self.get_by_pair_calls += 1
+                return super().get_by_provider_and_service(
+                    provider_id,
+                    service_id,
+                )
+
+        provider_repository = SpyProviderRepository()
+        service_repository = SpyServiceRepository()
+        provider_service_repository = SpyProviderServiceRepository()
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(provider_id=None, service_id=uuid4())
+
+        self.assertEqual(provider_repository.get_by_id_calls, 0)
+        self.assertEqual(service_repository.get_by_id_calls, 0)
+        self.assertEqual(provider_service_repository.get_by_pair_calls, 0)
+        self.assertEqual(provider_service_repository.save_calls, 0)
+
+    def test_provider_id_non_uuid_rejected_before_repositories(self):
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                provider_id="invalid-uuid",
+                service_id=uuid4(),
+            )
+
+        self.assertEqual(provider_service_repository.save_calls, 0)
+
+    def test_service_id_none_rejected_before_repositories(self):
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(provider_id=uuid4(), service_id=None)
+
+        self.assertEqual(provider_service_repository.save_calls, 0)
+
+    def test_service_id_non_uuid_rejected_before_repositories(self):
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                provider_id=uuid4(),
+                service_id="invalid-uuid",
+            )
+
+        self.assertEqual(provider_service_repository.save_calls, 0)
+
+    def test_provider_not_found_is_rejected(self):
+        service_repository = InMemoryServiceRepository()
+        service = self._active_service(uuid4(), uuid4())
+        service_repository.save(service)
+
+        use_case = CreateProviderService(
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                provider_id=uuid4(),
+                service_id=service.id,
+            )
+
+    def test_inactive_provider_is_rejected(self):
+        now = datetime.now(timezone.utc)
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Inactive",
+            slug="inactive-provider",
+            description="x",
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+        service = self._active_service(uuid4(), uuid4())
+        provider_repository.save(provider)
+        service_repository.save(service)
+
+        use_case = CreateProviderService(
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                provider_id=provider.id,
+                service_id=service.id,
+            )
+
+    def test_service_not_found_is_rejected(self):
+        provider_repository = InMemoryProviderRepository()
+        provider = self._active_provider(uuid4(), uuid4())
+        provider_repository.save(provider)
+
+        use_case = CreateProviderService(
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=provider_repository,
+            service_repository=InMemoryServiceRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                provider_id=provider.id,
+                service_id=uuid4(),
+            )
+
+    def test_inactive_service_is_rejected(self):
+        now = datetime.now(timezone.utc)
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider = self._active_provider(uuid4(), uuid4())
+        service = Service(
+            id=uuid4(),
+            category_id=uuid4(),
+            name="Inactive Service",
+            slug="inactive-service",
+            description="x",
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+        provider_repository.save(provider)
+        service_repository.save(service)
+
+        use_case = CreateProviderService(
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                provider_id=provider.id,
+                service_id=service.id,
+            )
+
+    def test_duplicate_is_rejected(self):
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+
+        provider = self._active_provider(uuid4(), uuid4())
+        service = self._active_service(uuid4(), uuid4())
+        provider_repository.save(provider)
+        service_repository.save(service)
+
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        use_case.execute(provider_id=provider.id, service_id=service.id)
+
+        with self.assertRaises(ValueError):
+            use_case.execute(provider_id=provider.id, service_id=service.id)
+
+    def test_inactive_existing_relation_still_rejected_as_duplicate(self):
+        provider_repository = InMemoryProviderRepository()
+        service_repository = InMemoryServiceRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+
+        provider = self._active_provider(uuid4(), uuid4())
+        service = self._active_service(uuid4(), uuid4())
+        provider_repository.save(provider)
+        service_repository.save(service)
+
+        now = datetime.now(timezone.utc)
+        relation = ProviderService(
+            id=uuid4(),
+            provider_id=provider.id,
+            service_id=service.id,
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+        provider_service_repository.save(relation)
+
+        use_case = CreateProviderService(
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(provider_id=provider.id, service_id=service.id)

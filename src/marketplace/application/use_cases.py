@@ -3,11 +3,13 @@ from uuid import UUID, uuid4
 
 from src.marketplace.application.ports import (
     ProviderRepository,
+    ProviderServiceRepository,
     ServiceCategoryRepository,
     ServiceRepository,
 )
 from src.marketplace.domain.entities import (
     Provider,
+    ProviderService,
     Service,
     ServiceCategory,
 )
@@ -185,3 +187,66 @@ class CreateProvider:
         )
 
         return self.provider_repository.save(provider)
+
+
+class CreateProviderService:
+    def __init__(
+        self,
+        provider_service_repository: ProviderServiceRepository,
+        provider_repository: ProviderRepository,
+        service_repository: ServiceRepository,
+    ):
+        self.provider_service_repository = provider_service_repository
+        self.provider_repository = provider_repository
+        self.service_repository = service_repository
+
+    def execute(
+        self,
+        *,
+        provider_id: UUID,
+        service_id: UUID,
+    ) -> ProviderService:
+        if provider_id is None:
+            raise ValueError("ProviderService provider_id is required.")
+        if not isinstance(provider_id, UUID):
+            raise ValueError(
+                "ProviderService provider_id must be a valid UUID instance."
+            )
+
+        if service_id is None:
+            raise ValueError("ProviderService service_id is required.")
+        if not isinstance(service_id, UUID):
+            raise ValueError(
+                "ProviderService service_id must be a valid UUID instance."
+            )
+
+        provider = self.provider_repository.get_by_id(provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        service = self.service_repository.get_by_id(service_id)
+        if service is None:
+            raise ValueError("Service does not exist.")
+        if not service.is_active:
+            raise ValueError("Service is inactive.")
+
+        existing = self.provider_service_repository.get_by_provider_and_service(
+            provider_id=provider_id,
+            service_id=service_id,
+        )
+        if existing is not None:
+            raise ValueError("ProviderService relationship already exists.")
+
+        now = datetime.now(timezone.utc)
+        provider_service = ProviderService(
+            id=uuid4(),
+            provider_id=provider_id,
+            service_id=service_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+        return self.provider_service_repository.save(provider_service)

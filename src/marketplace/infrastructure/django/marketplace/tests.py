@@ -5,14 +5,21 @@ from django.db import IntegrityError
 from django.db.models import ProtectedError
 from django.test import TestCase
 
-from src.marketplace.domain.entities import Provider, Service, ServiceCategory
+from src.marketplace.domain.entities import (
+    Provider,
+    ProviderService,
+    Service,
+    ServiceCategory,
+)
 from src.marketplace.infrastructure.django.marketplace.models import (
     ProviderModel,
+    ProviderServiceModel,
     ServiceModel,
     ServiceCategoryModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoProviderRepository,
+    DjangoProviderServiceRepository,
     DjangoServiceRepository,
     DjangoServiceCategoryRepository,
 )
@@ -517,3 +524,312 @@ class DjangoProviderRepositoryTests(TestCase):
 
         with self.assertRaises(ProtectedError):
             self.organization_a.delete()
+
+
+class DjangoProviderServiceRepositoryTests(TestCase):
+    def setUp(self):
+        self.category_repository = DjangoServiceCategoryRepository()
+        self.service_repository = DjangoServiceRepository()
+        self.provider_repository = DjangoProviderRepository()
+        self.provider_service_repository = DjangoProviderServiceRepository()
+
+        self.organization_a = OrganizationModel.objects.create(
+            name="ORG A",
+            slug="org-a",
+        )
+        self.organization_b = OrganizationModel.objects.create(
+            name="ORG B",
+            slug="org-b",
+        )
+
+        now = datetime.now(timezone.utc)
+        self.provider_a = self.provider_repository.save(
+            Provider(
+                id=uuid4(),
+                organization_id=self.organization_a.id,
+                display_name="Provider A",
+                slug="provider-a-base",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.provider_b = self.provider_repository.save(
+            Provider(
+                id=uuid4(),
+                organization_id=self.organization_b.id,
+                display_name="Provider B",
+                slug="provider-b-base",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        self.category = self.category_repository.save(
+            ServiceCategory(
+                id=uuid4(),
+                name="Categoria",
+                slug="categoria",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        self.service_a = self.service_repository.save(
+            Service(
+                id=uuid4(),
+                category_id=self.category.id,
+                name="Service A",
+                slug="service-a",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_b = self.service_repository.save(
+            Service(
+                id=uuid4(),
+                category_id=self.category.id,
+                name="Service B",
+                slug="service-b",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    def _build_provider_service(
+        self,
+        *,
+        provider_id,
+        service_id,
+        is_active: bool = True,
+    ) -> ProviderService:
+        now = datetime.now(timezone.utc)
+        return ProviderService(
+            id=uuid4(),
+            provider_id=provider_id,
+            service_id=service_id,
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_save(self):
+        provider_service = self._build_provider_service(
+            provider_id=self.provider_a.id,
+            service_id=self.service_a.id,
+        )
+
+        saved = self.provider_service_repository.save(provider_service)
+
+        self.assertEqual(saved.id, provider_service.id)
+        self.assertTrue(
+            ProviderServiceModel.objects.filter(id=provider_service.id).exists()
+        )
+
+    def test_get_by_id(self):
+        provider_service = self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        found = self.provider_service_repository.get_by_id(provider_service.id)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, provider_service.id)
+
+    def test_get_by_provider_and_service(self):
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        found = self.provider_service_repository.get_by_provider_and_service(
+            provider_id=self.provider_a.id,
+            service_id=self.service_a.id,
+        )
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.provider_id, self.provider_a.id)
+        self.assertEqual(found.service_id, self.service_a.id)
+
+    def test_get_by_provider_and_service_returns_none_when_missing(self):
+        found = self.provider_service_repository.get_by_provider_and_service(
+            provider_id=self.provider_a.id,
+            service_id=self.service_b.id,
+        )
+
+        self.assertIsNone(found)
+
+    def test_list_active_by_provider(self):
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+                is_active=True,
+            )
+        )
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_b.id,
+                is_active=False,
+            )
+        )
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_b.id,
+                service_id=self.service_a.id,
+                is_active=True,
+            )
+        )
+
+        results = self.provider_service_repository.list_active_by_provider(
+            self.provider_a.id,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].provider_id, self.provider_a.id)
+        self.assertEqual(results[0].service_id, self.service_a.id)
+
+    def test_list_active_by_service(self):
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+                is_active=True,
+            )
+        )
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_b.id,
+                service_id=self.service_a.id,
+                is_active=False,
+            )
+        )
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_b.id,
+                is_active=True,
+            )
+        )
+
+        results = self.provider_service_repository.list_active_by_service(
+            self.service_a.id,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].service_id, self.service_a.id)
+        self.assertEqual(results[0].provider_id, self.provider_a.id)
+
+    def test_listings_are_deterministic(self):
+        first = ProviderService(
+            id=uuid4(),
+            provider_id=self.provider_a.id,
+            service_id=self.service_a.id,
+            is_active=True,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        second = ProviderService(
+            id=uuid4(),
+            provider_id=self.provider_a.id,
+            service_id=self.service_b.id,
+            is_active=True,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        self.provider_service_repository.save(second)
+        self.provider_service_repository.save(first)
+
+        results = self.provider_service_repository.list_active_by_provider(
+            self.provider_a.id,
+        )
+
+        self.assertEqual(results[0].id, first.id)
+        self.assertEqual(results[1].id, second.id)
+
+    def test_constraint_provider_service_unique(self):
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        with self.assertRaises(IntegrityError):
+            self.provider_service_repository.save(
+                self._build_provider_service(
+                    provider_id=self.provider_a.id,
+                    service_id=self.service_a.id,
+                )
+            )
+
+    def test_same_provider_can_offer_different_services(self):
+        first = self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+        second = self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_b.id,
+            )
+        )
+
+        self.assertEqual(first.provider_id, second.provider_id)
+        self.assertNotEqual(first.service_id, second.service_id)
+
+    def test_different_providers_can_offer_same_service(self):
+        first = self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+        second = self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_b.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        self.assertEqual(first.service_id, second.service_id)
+        self.assertNotEqual(first.provider_id, second.provider_id)
+
+    def test_protect_prevents_provider_delete_when_linked(self):
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        with self.assertRaises(ProtectedError):
+            ProviderModel.objects.get(id=self.provider_a.id).delete()
+
+    def test_protect_prevents_service_delete_when_linked(self):
+        self.provider_service_repository.save(
+            self._build_provider_service(
+                provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        with self.assertRaises(ProtectedError):
+            ServiceModel.objects.get(id=self.service_a.id).delete()

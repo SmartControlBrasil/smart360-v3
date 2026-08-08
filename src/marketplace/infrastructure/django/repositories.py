@@ -2,16 +2,19 @@ from uuid import UUID
 
 from src.marketplace.application.ports import (
     ProviderRepository,
+    ProviderServiceRepository,
     ServiceCategoryRepository,
     ServiceRepository,
 )
 from src.marketplace.domain.entities import (
     Provider,
+    ProviderService,
     Service,
     ServiceCategory,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     ProviderModel,
+    ProviderServiceModel,
     ServiceModel,
     ServiceCategoryModel,
 )
@@ -191,5 +194,83 @@ class DjangoProviderRepository(ProviderRepository):
             organization_id=organization_id,
             is_active=True,
         ).order_by("display_name", "id")
+
+        return [self._to_entity(model) for model in models]
+
+
+class DjangoProviderServiceRepository(ProviderServiceRepository):
+    @staticmethod
+    def _to_entity(model: ProviderServiceModel) -> ProviderService:
+        return ProviderService(
+            id=model.id,
+            provider_id=model.provider_id,
+            service_id=model.service_id,
+            is_active=model.is_active,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    def save(
+        self,
+        provider_service: ProviderService,
+    ) -> ProviderService:
+        model, _ = ProviderServiceModel.objects.update_or_create(
+            id=provider_service.id,
+            defaults={
+                "provider_id": provider_service.provider_id,
+                "service_id": provider_service.service_id,
+                "is_active": provider_service.is_active,
+                "created_at": provider_service.created_at,
+                "updated_at": provider_service.updated_at,
+            },
+        )
+
+        return self._to_entity(model)
+
+    def get_by_id(
+        self,
+        provider_service_id: UUID,
+    ) -> ProviderService | None:
+        try:
+            model = ProviderServiceModel.objects.get(id=provider_service_id)
+        except ProviderServiceModel.DoesNotExist:
+            return None
+
+        return self._to_entity(model)
+
+    def get_by_provider_and_service(
+        self,
+        provider_id: UUID,
+        service_id: UUID,
+    ) -> ProviderService | None:
+        try:
+            model = ProviderServiceModel.objects.get(
+                provider_id=provider_id,
+                service_id=service_id,
+            )
+        except ProviderServiceModel.DoesNotExist:
+            return None
+
+        return self._to_entity(model)
+
+    def list_active_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[ProviderService]:
+        models = ProviderServiceModel.objects.filter(
+            provider_id=provider_id,
+            is_active=True,
+        ).order_by("created_at", "id")
+
+        return [self._to_entity(model) for model in models]
+
+    def list_active_by_service(
+        self,
+        service_id: UUID,
+    ) -> list[ProviderService]:
+        models = ProviderServiceModel.objects.filter(
+            service_id=service_id,
+            is_active=True,
+        ).order_by("created_at", "id")
 
         return [self._to_entity(model) for model in models]

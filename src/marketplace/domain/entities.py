@@ -110,3 +110,34 @@ class Provider:
 
     def deactivate(self) -> None:
         self.is_active = False
+
+
+@dataclass(slots=True)
+class ProviderService:
+    id: UUID
+    provider_id: UUID
+    service_id: UUID
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.provider_id is None:
+            raise ValueError("ProviderService provider_id is required.")
+        if not isinstance(self.provider_id, UUID):
+            raise ValueError(
+                "ProviderService provider_id must be a valid UUID instance."
+            )
+
+        if self.service_id is None:
+            raise ValueError("ProviderService service_id is required.")
+        if not isinstance(self.service_id, UUID):
+            raise ValueError(
+                "ProviderService service_id must be a valid UUID instance."
+            )
+
+    def activate(self) -> None:
+        self.is_active = True
+
+    def deactivate(self) -> None:
+        self.is_active = False
