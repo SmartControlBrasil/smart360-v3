@@ -2,16 +2,22 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from django.db import IntegrityError
+from django.db.models import ProtectedError
 from django.test import TestCase
 
-from src.marketplace.domain.entities import Service, ServiceCategory
+from src.marketplace.domain.entities import Provider, Service, ServiceCategory
 from src.marketplace.infrastructure.django.marketplace.models import (
+    ProviderModel,
     ServiceModel,
     ServiceCategoryModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
+    DjangoProviderRepository,
     DjangoServiceRepository,
     DjangoServiceCategoryRepository,
+)
+from src.organizations.infrastructure.django.organizations.models import (
+    OrganizationModel,
 )
 
 
@@ -303,3 +309,211 @@ class DjangoServiceRepositoryTests(TestCase):
 
         self.assertEqual(first.slug, second.slug)
         self.assertNotEqual(first.category_id, second.category_id)
+
+
+class DjangoProviderRepositoryTests(TestCase):
+    def setUp(self):
+        self.repository = DjangoProviderRepository()
+        self.organization_a = OrganizationModel.objects.create(
+            name="ACME Organization A",
+            slug="acme-org-a",
+        )
+        self.organization_b = OrganizationModel.objects.create(
+            name="ACME Organization B",
+            slug="acme-org-b",
+        )
+
+    def _build_provider(
+        self,
+        *,
+        organization_id,
+        display_name: str,
+        slug: str,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=uuid4(),
+            organization_id=organization_id,
+            display_name=display_name,
+            slug=slug,
+            description="Descricao",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_save(self):
+        provider = self._build_provider(
+            organization_id=self.organization_a.id,
+            display_name="ACME Automacao",
+            slug="acme-automacao",
+        )
+
+        saved = self.repository.save(provider)
+
+        self.assertEqual(saved.id, provider.id)
+        self.assertEqual(saved.organization_id, self.organization_a.id)
+        self.assertTrue(
+            ProviderModel.objects.filter(id=provider.id).exists()
+        )
+
+    def test_get_by_id(self):
+        provider = self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Provider A",
+                slug="provider-a",
+            )
+        )
+
+        found = self.repository.get_by_id(provider.id)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, provider.id)
+        self.assertEqual(found.organization_id, self.organization_a.id)
+
+    def test_get_by_slug(self):
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Provider B",
+                slug="provider-b",
+            )
+        )
+
+        found = self.repository.get_by_slug("provider-b")
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.display_name, "Provider B")
+
+    def test_get_by_slug_returns_none_when_missing(self):
+        self.assertIsNone(self.repository.get_by_slug("missing-provider"))
+
+    def test_list_active_by_organization(self):
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Ativo A",
+                slug="ativo-a",
+                is_active=True,
+            )
+        )
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Inativo A",
+                slug="inativo-a",
+                is_active=False,
+            )
+        )
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_b.id,
+                display_name="Ativo B",
+                slug="ativo-b",
+                is_active=True,
+            )
+        )
+
+        results = self.repository.list_active_by_organization(
+            self.organization_a.id,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].slug, "ativo-a")
+        self.assertEqual(results[0].organization_id, self.organization_a.id)
+
+    def test_list_active_by_organization_is_deterministic(self):
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Zulu Provider",
+                slug="zulu-provider",
+            )
+        )
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Alpha Provider",
+                slug="alpha-provider",
+            )
+        )
+
+        results = self.repository.list_active_by_organization(
+            self.organization_a.id,
+        )
+
+        self.assertEqual(results[0].display_name, "Alpha Provider")
+        self.assertEqual(results[1].display_name, "Zulu Provider")
+
+    def test_slug_is_globally_unique(self):
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Provider One",
+                slug="unique-provider",
+            )
+        )
+
+        with self.assertRaises(IntegrityError):
+            self.repository.save(
+                self._build_provider(
+                    organization_id=self.organization_b.id,
+                    display_name="Provider Two",
+                    slug="unique-provider",
+                )
+            )
+
+    def test_same_display_name_allowed_for_different_providers(self):
+        first = self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Nome Igual",
+                slug="nome-igual-a",
+            )
+        )
+        second = self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_b.id,
+                display_name="Nome Igual",
+                slug="nome-igual-b",
+            )
+        )
+
+        self.assertEqual(first.display_name, second.display_name)
+        self.assertNotEqual(first.id, second.id)
+
+    def test_multiple_providers_can_belong_to_same_organization(self):
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Provider A1",
+                slug="provider-a1",
+            )
+        )
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Provider A2",
+                slug="provider-a2",
+            )
+        )
+
+        providers = ProviderModel.objects.filter(
+            organization_id=self.organization_a.id,
+        )
+
+        self.assertEqual(providers.count(), 2)
+
+    def test_protect_prevents_organization_delete_with_provider(self):
+        self.repository.save(
+            self._build_provider(
+                organization_id=self.organization_a.id,
+                display_name="Provider Protect",
+                slug="provider-protect",
+            )
+        )
+
+        with self.assertRaises(ProtectedError):
+            self.organization_a.delete()

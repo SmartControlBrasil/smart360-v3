@@ -71,3 +71,42 @@ class Service:
 
     def deactivate(self) -> None:
         self.is_active = False
+
+
+@dataclass(slots=True)
+class Provider:
+    id: UUID
+    organization_id: UUID
+    display_name: str
+    slug: str
+    description: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.organization_id is None:
+            raise ValueError("Provider organization_id is required.")
+        if not isinstance(self.organization_id, UUID):
+            raise ValueError(
+                "Provider organization_id must be a valid UUID instance."
+            )
+
+        normalized_display_name = self.display_name.strip()
+        normalized_slug = self.slug.strip().lower()
+
+        if not normalized_display_name:
+            raise ValueError("Provider display_name cannot be empty.")
+
+        if not normalized_slug:
+            raise ValueError("Provider slug cannot be empty.")
+
+        self.display_name = normalized_display_name
+        self.slug = normalized_slug
+        self.description = self.description.strip()
+
+    def activate(self) -> None:
+        self.is_active = True
+
+    def deactivate(self) -> None:
+        self.is_active = False

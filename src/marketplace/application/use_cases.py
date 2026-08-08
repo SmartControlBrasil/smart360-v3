@@ -2,10 +2,16 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from src.marketplace.application.ports import (
+    ProviderRepository,
     ServiceCategoryRepository,
     ServiceRepository,
 )
-from src.marketplace.domain.entities import Service, ServiceCategory
+from src.marketplace.domain.entities import (
+    Provider,
+    Service,
+    ServiceCategory,
+)
+from src.organizations.application.ports import OrganizationRepository
 
 
 class CreateServiceCategory:
@@ -113,3 +119,69 @@ class CreateService:
         )
 
         return self.service_repository.save(service)
+
+
+class CreateProvider:
+    def __init__(
+        self,
+        provider_repository: ProviderRepository,
+        organization_repository: OrganizationRepository,
+    ):
+        self.provider_repository = provider_repository
+        self.organization_repository = organization_repository
+
+    def execute(
+        self,
+        *,
+        organization_id: UUID,
+        display_name: str,
+        slug: str,
+        description: str = "",
+    ) -> Provider:
+        if organization_id is None:
+            raise ValueError("Provider organization_id is required.")
+        if not isinstance(organization_id, UUID):
+            raise ValueError(
+                "Provider organization_id must be a valid UUID instance."
+            )
+
+        organization = self.organization_repository.get_by_id(
+            organization_id,
+        )
+
+        if organization is None:
+            raise ValueError("Organization does not exist.")
+
+        if not organization.is_active:
+            raise ValueError("Organization is inactive.")
+
+        normalized_display_name = display_name.strip()
+        normalized_slug = slug.strip().lower()
+
+        if not normalized_display_name:
+            raise ValueError("Provider display_name cannot be empty.")
+
+        if not normalized_slug:
+            raise ValueError("Provider slug cannot be empty.")
+
+        existing = self.provider_repository.get_by_slug(
+            normalized_slug,
+        )
+
+        if existing is not None:
+            raise ValueError("Provider slug already exists.")
+
+        now = datetime.now(timezone.utc)
+
+        provider = Provider(
+            id=uuid4(),
+            organization_id=organization_id,
+            display_name=normalized_display_name,
+            slug=normalized_slug,
+            description=description,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+        return self.provider_repository.save(provider)

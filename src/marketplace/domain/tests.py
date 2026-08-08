@@ -3,7 +3,11 @@ from uuid import uuid4
 
 from django.test import SimpleTestCase
 
-from src.marketplace.domain.entities import Service, ServiceCategory
+from src.marketplace.domain.entities import (
+    Provider,
+    Service,
+    ServiceCategory,
+)
 
 
 class ServiceCategoryDomainTests(SimpleTestCase):
@@ -150,3 +154,91 @@ class ServiceDomainTests(SimpleTestCase):
 
         service.activate()
         self.assertTrue(service.is_active)
+
+
+class ProviderDomainTests(SimpleTestCase):
+    def test_valid_creation_normalizes_fields(self):
+        provider = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="  ACME Automacao  ",
+            slug="  ACME-AUTOMACAO  ",
+            description="  Perfil operacional  ",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(provider.display_name, "ACME Automacao")
+        self.assertEqual(provider.slug, "acme-automacao")
+        self.assertEqual(provider.description, "Perfil operacional")
+
+    def test_organization_id_is_required(self):
+        with self.assertRaises(ValueError):
+            Provider(
+                id=uuid4(),
+                organization_id=None,
+                display_name="ACME",
+                slug="acme",
+                description="x",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_organization_id_must_be_uuid_instance(self):
+        with self.assertRaises(ValueError):
+            Provider(
+                id=uuid4(),
+                organization_id="invalid-uuid",
+                display_name="ACME",
+                slug="acme",
+                description="x",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_empty_display_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Provider(
+                id=uuid4(),
+                organization_id=uuid4(),
+                display_name="   ",
+                slug="acme",
+                description="x",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_empty_slug_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Provider(
+                id=uuid4(),
+                organization_id=uuid4(),
+                display_name="ACME",
+                slug="   ",
+                description="x",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_activate_and_deactivate(self):
+        provider = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="ACME",
+            slug="acme",
+            description="x",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        provider.deactivate()
+        self.assertFalse(provider.is_active)
+
+        provider.activate()
+        self.assertTrue(provider.is_active)

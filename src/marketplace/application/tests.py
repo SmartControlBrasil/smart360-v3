@@ -4,10 +4,16 @@ from uuid import UUID, uuid4
 from django.test import SimpleTestCase
 
 from src.marketplace.application.use_cases import (
+    CreateProvider,
     CreateService,
     CreateServiceCategory,
 )
-from src.marketplace.domain.entities import Service, ServiceCategory
+from src.marketplace.domain.entities import (
+    Provider,
+    Service,
+    ServiceCategory,
+)
+from src.organizations.domain.entities import Organization
 
 
 class InMemoryServiceCategoryRepository:
@@ -354,4 +360,283 @@ class CreateServiceTests(SimpleTestCase):
                 category_id=category.id,
                 name="Segundo",
                 slug="manutencao",
+            )
+
+
+class InMemoryOrganizationRepository:
+    def __init__(self):
+        self._items: dict[str, Organization] = {}
+
+    def save(self, organization: Organization) -> Organization:
+        self._items[str(organization.id)] = organization
+        return organization
+
+    def get_by_id(self, organization_id: UUID) -> Organization | None:
+        return self._items.get(str(organization_id))
+
+    def get_by_slug(self, slug: str) -> Organization | None:
+        for item in self._items.values():
+            if item.slug == slug:
+                return item
+        return None
+
+
+class InMemoryProviderRepository:
+    def __init__(self):
+        self._items: dict[str, Provider] = {}
+
+    def save(self, provider: Provider) -> Provider:
+        self._items[str(provider.id)] = provider
+        return provider
+
+    def get_by_id(self, provider_id: UUID) -> Provider | None:
+        return self._items.get(str(provider_id))
+
+    def get_by_slug(self, slug: str) -> Provider | None:
+        for item in self._items.values():
+            if item.slug == slug:
+                return item
+        return None
+
+    def list_active_by_organization(
+        self,
+        organization_id: UUID,
+    ) -> list[Provider]:
+        return [
+            item
+            for item in self._items.values()
+            if item.organization_id == organization_id and item.is_active
+        ]
+
+
+class CreateProviderTests(SimpleTestCase):
+    @staticmethod
+    def _organization(
+        organization_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Organization:
+        now = datetime.now(timezone.utc)
+        return Organization(
+            id=organization_id,
+            name="ACME Org",
+            slug="acme-org",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_valid_creation(self):
+        organization_repository = InMemoryOrganizationRepository()
+        provider_repository = InMemoryProviderRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+
+        use_case = CreateProvider(
+            provider_repository=provider_repository,
+            organization_repository=organization_repository,
+        )
+
+        created = use_case.execute(
+            organization_id=organization.id,
+            display_name="ACME Automacao",
+            slug="acme-automacao",
+            description="Perfil",
+        )
+
+        self.assertIsNotNone(created.id)
+        self.assertIsInstance(created.id, UUID)
+        self.assertEqual(created.organization_id, organization.id)
+        self.assertEqual(created.display_name, "ACME Automacao")
+        self.assertEqual(created.slug, "acme-automacao")
+        self.assertTrue(created.is_active)
+
+    def test_organization_id_none_rejected_before_repositories(self):
+        class SpyOrganizationRepository(InMemoryOrganizationRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(
+                self,
+                organization_id: UUID,
+            ) -> Organization | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(organization_id)
+
+        class SpyProviderRepository(InMemoryProviderRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_slug_calls = 0
+
+            def get_by_slug(self, slug: str) -> Provider | None:
+                self.get_by_slug_calls += 1
+                return super().get_by_slug(slug)
+
+        organization_repository = SpyOrganizationRepository()
+        provider_repository = SpyProviderRepository()
+        use_case = CreateProvider(
+            provider_repository=provider_repository,
+            organization_repository=organization_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=None,
+                display_name="ACME",
+                slug="acme",
+            )
+
+        self.assertEqual(organization_repository.get_by_id_calls, 0)
+        self.assertEqual(provider_repository.get_by_slug_calls, 0)
+
+    def test_organization_id_non_uuid_rejected_before_repositories(self):
+        class SpyOrganizationRepository(InMemoryOrganizationRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(
+                self,
+                organization_id: UUID,
+            ) -> Organization | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(organization_id)
+
+        class SpyProviderRepository(InMemoryProviderRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_slug_calls = 0
+
+            def get_by_slug(self, slug: str) -> Provider | None:
+                self.get_by_slug_calls += 1
+                return super().get_by_slug(slug)
+
+        organization_repository = SpyOrganizationRepository()
+        provider_repository = SpyProviderRepository()
+        use_case = CreateProvider(
+            provider_repository=provider_repository,
+            organization_repository=organization_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id="invalid-uuid",
+                display_name="ACME",
+                slug="acme",
+            )
+
+        self.assertEqual(organization_repository.get_by_id_calls, 0)
+        self.assertEqual(provider_repository.get_by_slug_calls, 0)
+
+    def test_organization_not_found_is_rejected(self):
+        use_case = CreateProvider(
+            provider_repository=InMemoryProviderRepository(),
+            organization_repository=InMemoryOrganizationRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=uuid4(),
+                display_name="ACME",
+                slug="acme",
+            )
+
+    def test_inactive_organization_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        organization = self._organization(uuid4(), is_active=False)
+        organization_repository.save(organization)
+
+        use_case = CreateProvider(
+            provider_repository=InMemoryProviderRepository(),
+            organization_repository=organization_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                display_name="ACME",
+                slug="acme",
+            )
+
+    def test_empty_display_name_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+
+        use_case = CreateProvider(
+            provider_repository=InMemoryProviderRepository(),
+            organization_repository=organization_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                display_name="   ",
+                slug="acme",
+            )
+
+    def test_empty_slug_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+
+        use_case = CreateProvider(
+            provider_repository=InMemoryProviderRepository(),
+            organization_repository=organization_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                display_name="ACME",
+                slug="   ",
+            )
+
+    def test_duplicate_slug_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        provider_repository = InMemoryProviderRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+
+        use_case = CreateProvider(
+            provider_repository=provider_repository,
+            organization_repository=organization_repository,
+        )
+
+        use_case.execute(
+            organization_id=organization.id,
+            display_name="Primeiro",
+            slug="acme",
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                display_name="Segundo",
+                slug="ACME",
+            )
+
+    def test_slug_normalized_before_duplicate_lookup(self):
+        organization_repository = InMemoryOrganizationRepository()
+        provider_repository = InMemoryProviderRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+
+        use_case = CreateProvider(
+            provider_repository=provider_repository,
+            organization_repository=organization_repository,
+        )
+
+        use_case.execute(
+            organization_id=organization.id,
+            display_name="Primeiro",
+            slug="ACME-AUTOMACAO",
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                display_name="Segundo",
+                slug="acme-automacao",
             )
