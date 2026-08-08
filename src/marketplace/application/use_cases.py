@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from src.marketplace.application.ports import (
     ProviderRepository,
     ProviderServiceRepository,
+    ServiceRequestRepository,
     ServiceCategoryRepository,
     ServiceRepository,
 )
@@ -12,6 +13,8 @@ from src.marketplace.domain.entities import (
     ProviderService,
     Service,
     ServiceCategory,
+    ServiceRequest,
+    ServiceRequestStatus,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -250,3 +253,68 @@ class CreateProviderService:
         )
 
         return self.provider_service_repository.save(provider_service)
+
+
+class CreateServiceRequest:
+    def __init__(
+        self,
+        service_request_repository: ServiceRequestRepository,
+        organization_repository: OrganizationRepository,
+        service_repository: ServiceRepository,
+    ):
+        self.service_request_repository = service_request_repository
+        self.organization_repository = organization_repository
+        self.service_repository = service_repository
+
+    def execute(
+        self,
+        *,
+        organization_id: UUID,
+        service_id: UUID,
+        title: str,
+        description: str = "",
+    ) -> ServiceRequest:
+        if organization_id is None:
+            raise ValueError("ServiceRequest organization_id is required.")
+        if not isinstance(organization_id, UUID):
+            raise ValueError(
+                "ServiceRequest organization_id must be a valid UUID instance."
+            )
+
+        if service_id is None:
+            raise ValueError("ServiceRequest service_id is required.")
+        if not isinstance(service_id, UUID):
+            raise ValueError(
+                "ServiceRequest service_id must be a valid UUID instance."
+            )
+
+        organization = self.organization_repository.get_by_id(organization_id)
+        if organization is None:
+            raise ValueError("Organization does not exist.")
+        if not organization.is_active:
+            raise ValueError("Organization is inactive.")
+
+        service = self.service_repository.get_by_id(service_id)
+        if service is None:
+            raise ValueError("Service does not exist.")
+        if not service.is_active:
+            raise ValueError("Service is inactive.")
+
+        normalized_title = title.strip()
+        if not normalized_title:
+            raise ValueError("ServiceRequest title cannot be empty.")
+        normalized_description = description.strip()
+
+        now = datetime.now(timezone.utc)
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=organization_id,
+            service_id=service_id,
+            title=normalized_title,
+            description=normalized_description,
+            status=ServiceRequestStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+
+        return self.service_request_repository.save(service_request)

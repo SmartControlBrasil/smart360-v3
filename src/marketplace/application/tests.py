@@ -8,12 +8,15 @@ from src.marketplace.application.use_cases import (
     CreateProviderService,
     CreateService,
     CreateServiceCategory,
+    CreateServiceRequest,
 )
 from src.marketplace.domain.entities import (
     Provider,
     ProviderService,
     Service,
     ServiceCategory,
+    ServiceRequest,
+    ServiceRequestStatus,
 )
 from src.organizations.domain.entities import Organization
 
@@ -696,6 +699,47 @@ class InMemoryProviderServiceRepository:
         ]
 
 
+class InMemoryServiceRequestRepository:
+    def __init__(self):
+        self._items: dict[str, ServiceRequest] = {}
+        self.save_calls = 0
+        self.last_saved: ServiceRequest | None = None
+
+    def save(self, service_request: ServiceRequest) -> ServiceRequest:
+        self.save_calls += 1
+        self.last_saved = service_request
+        self._items[str(service_request.id)] = service_request
+        return service_request
+
+    def get_by_id(
+        self,
+        service_request_id: UUID,
+    ) -> ServiceRequest | None:
+        return self._items.get(str(service_request_id))
+
+    def list_open_by_organization(
+        self,
+        organization_id: UUID,
+    ) -> list[ServiceRequest]:
+        return [
+            item
+            for item in self._items.values()
+            if item.organization_id == organization_id
+            and item.status == ServiceRequestStatus.OPEN
+        ]
+
+    def list_open_by_service(
+        self,
+        service_id: UUID,
+    ) -> list[ServiceRequest]:
+        return [
+            item
+            for item in self._items.values()
+            if item.service_id == service_id
+            and item.status == ServiceRequestStatus.OPEN
+        ]
+
+
 class CreateProviderServiceTests(SimpleTestCase):
     @staticmethod
     def _active_provider(provider_id: UUID, organization_id: UUID) -> Provider:
@@ -1002,3 +1046,224 @@ class CreateProviderServiceTests(SimpleTestCase):
 
         with self.assertRaises(ValueError):
             use_case.execute(provider_id=provider.id, service_id=service.id)
+
+
+class CreateServiceRequestTests(SimpleTestCase):
+    @staticmethod
+    def _organization(
+        organization_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Organization:
+        now = datetime.now(timezone.utc)
+        return Organization(
+            id=organization_id,
+            name="Org Solicitante",
+            slug="org-solicitante",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _service(
+        service_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Service:
+        now = datetime.now(timezone.utc)
+        return Service(
+            id=service_id,
+            category_id=uuid4(),
+            name="Manutencao CLP",
+            slug=f"manutencao-clp-{service_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_valid_creation(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_repository = InMemoryServiceRepository()
+        service_request_repository = InMemoryServiceRequestRepository()
+        organization = self._organization(uuid4())
+        service = self._service(uuid4())
+        organization_repository.save(organization)
+        service_repository.save(service)
+
+        use_case = CreateServiceRequest(
+            service_request_repository=service_request_repository,
+            organization_repository=organization_repository,
+            service_repository=service_repository,
+        )
+
+        created = use_case.execute(
+            organization_id=organization.id,
+            service_id=service.id,
+            title="  Falha em CLP  ",
+            description="  Linha parada  ",
+        )
+
+        self.assertIsInstance(created.id, UUID)
+        self.assertEqual(created.status, ServiceRequestStatus.OPEN)
+        self.assertEqual(created.title, "Falha em CLP")
+        self.assertEqual(created.description, "Linha parada")
+        self.assertEqual(created.organization_id, organization.id)
+        self.assertEqual(created.service_id, service.id)
+        self.assertIsNotNone(created.created_at.tzinfo)
+        self.assertIsNotNone(created.updated_at.tzinfo)
+        self.assertEqual(service_request_repository.save_calls, 1)
+        self.assertIsNotNone(service_request_repository.last_saved)
+
+    def test_organization_id_invalid_rejected_before_repositories(self):
+        class SpyOrganizationRepository(InMemoryOrganizationRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, organization_id: UUID) -> Organization | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(organization_id)
+
+        class SpyServiceRepository(InMemoryServiceRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, service_id: UUID) -> Service | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(service_id)
+
+        organization_repository = SpyOrganizationRepository()
+        service_repository = SpyServiceRepository()
+        service_request_repository = InMemoryServiceRequestRepository()
+        use_case = CreateServiceRequest(
+            service_request_repository=service_request_repository,
+            organization_repository=organization_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id="invalid-uuid",
+                service_id=uuid4(),
+                title="Titulo",
+            )
+
+        self.assertEqual(organization_repository.get_by_id_calls, 0)
+        self.assertEqual(service_repository.get_by_id_calls, 0)
+        self.assertEqual(service_request_repository.save_calls, 0)
+
+    def test_service_id_invalid_rejected_before_repositories(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_repository = InMemoryServiceRepository()
+        service_request_repository = InMemoryServiceRequestRepository()
+        use_case = CreateServiceRequest(
+            service_request_repository=service_request_repository,
+            organization_repository=organization_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=uuid4(),
+                service_id="invalid-uuid",
+                title="Titulo",
+            )
+
+        self.assertEqual(service_request_repository.save_calls, 0)
+
+    def test_organization_not_found_is_rejected(self):
+        service_repository = InMemoryServiceRepository()
+        service = self._service(uuid4())
+        service_repository.save(service)
+        use_case = CreateServiceRequest(
+            service_request_repository=InMemoryServiceRequestRepository(),
+            organization_repository=InMemoryOrganizationRepository(),
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=uuid4(),
+                service_id=service.id,
+                title="Titulo",
+            )
+
+    def test_inactive_organization_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_repository = InMemoryServiceRepository()
+        organization = self._organization(uuid4(), is_active=False)
+        service = self._service(uuid4())
+        organization_repository.save(organization)
+        service_repository.save(service)
+        use_case = CreateServiceRequest(
+            service_request_repository=InMemoryServiceRequestRepository(),
+            organization_repository=organization_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                service_id=service.id,
+                title="Titulo",
+            )
+
+    def test_service_not_found_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+        use_case = CreateServiceRequest(
+            service_request_repository=InMemoryServiceRequestRepository(),
+            organization_repository=organization_repository,
+            service_repository=InMemoryServiceRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                service_id=uuid4(),
+                title="Titulo",
+            )
+
+    def test_inactive_service_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_repository = InMemoryServiceRepository()
+        organization = self._organization(uuid4())
+        inactive_service = self._service(uuid4(), is_active=False)
+        organization_repository.save(organization)
+        service_repository.save(inactive_service)
+        use_case = CreateServiceRequest(
+            service_request_repository=InMemoryServiceRequestRepository(),
+            organization_repository=organization_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                service_id=inactive_service.id,
+                title="Titulo",
+            )
+
+    def test_empty_title_is_rejected(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_repository = InMemoryServiceRepository()
+        organization = self._organization(uuid4())
+        service = self._service(uuid4())
+        organization_repository.save(organization)
+        service_repository.save(service)
+        use_case = CreateServiceRequest(
+            service_request_repository=InMemoryServiceRequestRepository(),
+            organization_repository=organization_repository,
+            service_repository=service_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                organization_id=organization.id,
+                service_id=service.id,
+                title="   ",
+            )

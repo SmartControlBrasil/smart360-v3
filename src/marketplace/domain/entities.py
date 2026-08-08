@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 
@@ -141,3 +142,56 @@ class ProviderService:
 
     def deactivate(self) -> None:
         self.is_active = False
+
+
+class ServiceRequestStatus(StrEnum):
+    OPEN = "open"
+    CANCELLED = "cancelled"
+    CLOSED = "closed"
+
+
+@dataclass(slots=True)
+class ServiceRequest:
+    id: UUID
+    organization_id: UUID
+    service_id: UUID
+    title: str
+    description: str
+    status: ServiceRequestStatus
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.organization_id is None:
+            raise ValueError("ServiceRequest organization_id is required.")
+        if not isinstance(self.organization_id, UUID):
+            raise ValueError(
+                "ServiceRequest organization_id must be a valid UUID instance."
+            )
+
+        if self.service_id is None:
+            raise ValueError("ServiceRequest service_id is required.")
+        if not isinstance(self.service_id, UUID):
+            raise ValueError(
+                "ServiceRequest service_id must be a valid UUID instance."
+            )
+
+        normalized_title = self.title.strip()
+        if not normalized_title:
+            raise ValueError("ServiceRequest title cannot be empty.")
+
+        if not isinstance(self.status, ServiceRequestStatus):
+            raise ValueError("ServiceRequest status must be a ServiceRequestStatus.")
+
+        self.title = normalized_title
+        self.description = self.description.strip()
+
+    def cancel(self) -> None:
+        if self.status is not ServiceRequestStatus.OPEN:
+            raise ValueError("Only OPEN service requests can be cancelled.")
+        self.status = ServiceRequestStatus.CANCELLED
+
+    def close(self) -> None:
+        if self.status is not ServiceRequestStatus.OPEN:
+            raise ValueError("Only OPEN service requests can be closed.")
+        self.status = ServiceRequestStatus.CLOSED

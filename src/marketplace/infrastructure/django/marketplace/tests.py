@@ -10,16 +10,20 @@ from src.marketplace.domain.entities import (
     ProviderService,
     Service,
     ServiceCategory,
+    ServiceRequest,
+    ServiceRequestStatus,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     ProviderModel,
     ProviderServiceModel,
     ServiceModel,
     ServiceCategoryModel,
+    ServiceRequestModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoProviderRepository,
     DjangoProviderServiceRepository,
+    DjangoServiceRequestRepository,
     DjangoServiceRepository,
     DjangoServiceCategoryRepository,
 )
@@ -827,6 +831,260 @@ class DjangoProviderServiceRepositoryTests(TestCase):
         self.provider_service_repository.save(
             self._build_provider_service(
                 provider_id=self.provider_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        with self.assertRaises(ProtectedError):
+            ServiceModel.objects.get(id=self.service_a.id).delete()
+
+
+class DjangoServiceRequestRepositoryTests(TestCase):
+    def setUp(self):
+        self.repository = DjangoServiceRequestRepository()
+        self.service_category_repository = DjangoServiceCategoryRepository()
+        self.service_repository = DjangoServiceRepository()
+
+        self.organization_a = OrganizationModel.objects.create(
+            name="Org A Requests",
+            slug="org-a-requests",
+        )
+        self.organization_b = OrganizationModel.objects.create(
+            name="Org B Requests",
+            slug="org-b-requests",
+        )
+
+        now = datetime.now(timezone.utc)
+        self.category = self.service_category_repository.save(
+            ServiceCategory(
+                id=uuid4(),
+                name="Automacao",
+                slug="automacao-requests",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_a = self.service_repository.save(
+            Service(
+                id=uuid4(),
+                category_id=self.category.id,
+                name="Manutencao CLP",
+                slug="manutencao-clp-requests",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_b = self.service_repository.save(
+            Service(
+                id=uuid4(),
+                category_id=self.category.id,
+                name="Retrofit",
+                slug="retrofit-requests",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    def _build_service_request(
+        self,
+        *,
+        organization_id,
+        service_id,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+        title: str = "Solicitacao",
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=uuid4(),
+            organization_id=organization_id,
+            service_id=service_id,
+            title=title,
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_save(self):
+        service_request = self._build_service_request(
+            organization_id=self.organization_a.id,
+            service_id=self.service_a.id,
+        )
+
+        saved = self.repository.save(service_request)
+
+        self.assertEqual(saved.id, service_request.id)
+        self.assertEqual(saved.status, ServiceRequestStatus.OPEN)
+        self.assertTrue(
+            ServiceRequestModel.objects.filter(id=service_request.id).exists()
+        )
+
+    def test_get_by_id(self):
+        service_request = self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        found = self.repository.get_by_id(service_request.id)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, service_request.id)
+        self.assertEqual(found.organization_id, self.organization_a.id)
+        self.assertEqual(found.service_id, self.service_a.id)
+
+    def test_get_by_id_returns_none_when_missing(self):
+        self.assertIsNone(self.repository.get_by_id(uuid4()))
+
+    def test_list_open_by_organization(self):
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_a.id,
+                status=ServiceRequestStatus.OPEN,
+                title="Open A",
+            )
+        )
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_b.id,
+                status=ServiceRequestStatus.CANCELLED,
+                title="Cancelled A",
+            )
+        )
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_b.id,
+                status=ServiceRequestStatus.CLOSED,
+                title="Closed A",
+            )
+        )
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_b.id,
+                service_id=self.service_a.id,
+                status=ServiceRequestStatus.OPEN,
+                title="Open B",
+            )
+        )
+
+        results = self.repository.list_open_by_organization(
+            self.organization_a.id,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "Open A")
+        self.assertEqual(results[0].status, ServiceRequestStatus.OPEN)
+        self.assertEqual(results[0].organization_id, self.organization_a.id)
+
+    def test_list_open_by_service(self):
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_a.id,
+                status=ServiceRequestStatus.OPEN,
+                title="Open A",
+            )
+        )
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_b.id,
+                service_id=self.service_a.id,
+                status=ServiceRequestStatus.CANCELLED,
+                title="Cancelled B",
+            )
+        )
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_b.id,
+                service_id=self.service_b.id,
+                status=ServiceRequestStatus.OPEN,
+                title="Open Other Service",
+            )
+        )
+
+        results = self.repository.list_open_by_service(self.service_a.id)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "Open A")
+        self.assertEqual(results[0].service_id, self.service_a.id)
+        self.assertEqual(results[0].status, ServiceRequestStatus.OPEN)
+
+    def test_listings_are_deterministic(self):
+        first = ServiceRequest(
+            id=uuid4(),
+            organization_id=self.organization_a.id,
+            service_id=self.service_a.id,
+            title="Primeira",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        second = ServiceRequest(
+            id=uuid4(),
+            organization_id=self.organization_a.id,
+            service_id=self.service_a.id,
+            title="Segunda",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        self.repository.save(second)
+        self.repository.save(first)
+
+        results = self.repository.list_open_by_organization(
+            self.organization_a.id,
+        )
+
+        self.assertEqual(results[0].id, first.id)
+        self.assertEqual(results[1].id, second.id)
+
+    def test_same_organization_can_open_multiple_requests_for_same_service(self):
+        first = self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_a.id,
+                title="Solicitacao 1",
+            )
+        )
+        second = self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_a.id,
+                title="Solicitacao 2",
+            )
+        )
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(first.organization_id, second.organization_id)
+        self.assertEqual(first.service_id, second.service_id)
+
+    def test_protect_prevents_organization_delete_when_linked(self):
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
+                service_id=self.service_a.id,
+            )
+        )
+
+        with self.assertRaises(ProtectedError):
+            self.organization_a.delete()
+
+    def test_protect_prevents_service_delete_when_linked(self):
+        self.repository.save(
+            self._build_service_request(
+                organization_id=self.organization_a.id,
                 service_id=self.service_a.id,
             )
         )

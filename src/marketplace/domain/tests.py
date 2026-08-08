@@ -8,6 +8,8 @@ from src.marketplace.domain.entities import (
     ProviderService,
     Service,
     ServiceCategory,
+    ServiceRequest,
+    ServiceRequestStatus,
 )
 
 
@@ -317,3 +319,161 @@ class ProviderServiceDomainTests(SimpleTestCase):
 
         provider_service.activate()
         self.assertTrue(provider_service.is_active)
+
+
+class ServiceRequestDomainTests(SimpleTestCase):
+    def test_valid_creation(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="  Manutencao de CLP  ",
+            description="  CLP nao inicia  ",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(service_request.title, "Manutencao de CLP")
+        self.assertEqual(service_request.description, "CLP nao inicia")
+        self.assertEqual(service_request.status, ServiceRequestStatus.OPEN)
+
+    def test_organization_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=None,
+                service_id=uuid4(),
+                title="Titulo",
+                description="x",
+                status=ServiceRequestStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_organization_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id="invalid-uuid",
+                service_id=uuid4(),
+                title="Titulo",
+                description="x",
+                status=ServiceRequestStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_service_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=uuid4(),
+                service_id=None,
+                title="Titulo",
+                description="x",
+                status=ServiceRequestStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_service_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=uuid4(),
+                service_id="invalid-uuid",
+                title="Titulo",
+                description="x",
+                status=ServiceRequestStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_title_empty_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=uuid4(),
+                service_id=uuid4(),
+                title="   ",
+                description="x",
+                status=ServiceRequestStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_status_must_be_enum(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=uuid4(),
+                service_id=uuid4(),
+                title="Titulo",
+                description="x",
+                status="open",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_cancel_open_to_cancelled(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Titulo",
+            description="x",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        service_request.cancel()
+
+        self.assertEqual(service_request.status, ServiceRequestStatus.CANCELLED)
+
+    def test_cancel_non_open_is_rejected(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Titulo",
+            description="x",
+            status=ServiceRequestStatus.CLOSED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        with self.assertRaises(ValueError):
+            service_request.cancel()
+
+    def test_close_open_to_closed(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Titulo",
+            description="x",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        service_request.close()
+
+        self.assertEqual(service_request.status, ServiceRequestStatus.CLOSED)
+
+    def test_close_non_open_is_rejected(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Titulo",
+            description="x",
+            status=ServiceRequestStatus.CANCELLED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        with self.assertRaises(ValueError):
+            service_request.close()

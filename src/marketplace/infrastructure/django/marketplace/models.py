@@ -133,3 +133,48 @@ class ProviderServiceModel(models.Model):
                 name="mkt_ps_srv_act_idx",
             ),
         ]
+
+
+class ServiceRequestModel(models.Model):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        CANCELLED = "cancelled", "Cancelled"
+        CLOSED = "closed", "Closed"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    organization = models.ForeignKey(
+        OrganizationModel,
+        on_delete=models.PROTECT,
+        related_name="service_requests",
+    )
+    service = models.ForeignKey(
+        ServiceModel,
+        on_delete=models.PROTECT,
+        related_name="service_requests",
+    )
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.OPEN,
+    )
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_service_requests"
+        indexes = [
+            models.Index(
+                fields=["organization", "status"],
+                name="mkt_sr_org_status_idx",
+            ),
+            models.Index(
+                fields=["service", "status"],
+                name="mkt_sr_srv_status_idx",
+            ),
+        ]

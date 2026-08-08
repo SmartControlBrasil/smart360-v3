@@ -3,6 +3,7 @@ from uuid import UUID
 from src.marketplace.application.ports import (
     ProviderRepository,
     ProviderServiceRepository,
+    ServiceRequestRepository,
     ServiceCategoryRepository,
     ServiceRepository,
 )
@@ -11,12 +12,15 @@ from src.marketplace.domain.entities import (
     ProviderService,
     Service,
     ServiceCategory,
+    ServiceRequest,
+    ServiceRequestStatus,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     ProviderModel,
     ProviderServiceModel,
     ServiceModel,
     ServiceCategoryModel,
+    ServiceRequestModel,
 )
 
 
@@ -273,4 +277,66 @@ class DjangoProviderServiceRepository(ProviderServiceRepository):
             is_active=True,
         ).order_by("created_at", "id")
 
+        return [self._to_entity(model) for model in models]
+
+
+class DjangoServiceRequestRepository(ServiceRequestRepository):
+    @staticmethod
+    def _to_entity(model: ServiceRequestModel) -> ServiceRequest:
+        return ServiceRequest(
+            id=model.id,
+            organization_id=model.organization_id,
+            service_id=model.service_id,
+            title=model.title,
+            description=model.description,
+            status=ServiceRequestStatus(model.status),
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    def save(self, service_request: ServiceRequest) -> ServiceRequest:
+        model, _ = ServiceRequestModel.objects.update_or_create(
+            id=service_request.id,
+            defaults={
+                "organization_id": service_request.organization_id,
+                "service_id": service_request.service_id,
+                "title": service_request.title,
+                "description": service_request.description,
+                "status": service_request.status.value,
+                "created_at": service_request.created_at,
+                "updated_at": service_request.updated_at,
+            },
+        )
+
+        return self._to_entity(model)
+
+    def get_by_id(
+        self,
+        service_request_id: UUID,
+    ) -> ServiceRequest | None:
+        try:
+            model = ServiceRequestModel.objects.get(id=service_request_id)
+        except ServiceRequestModel.DoesNotExist:
+            return None
+
+        return self._to_entity(model)
+
+    def list_open_by_organization(
+        self,
+        organization_id: UUID,
+    ) -> list[ServiceRequest]:
+        models = ServiceRequestModel.objects.filter(
+            organization_id=organization_id,
+            status=ServiceRequestModel.Status.OPEN,
+        ).order_by("created_at", "id")
+        return [self._to_entity(model) for model in models]
+
+    def list_open_by_service(
+        self,
+        service_id: UUID,
+    ) -> list[ServiceRequest]:
+        models = ServiceRequestModel.objects.filter(
+            service_id=service_id,
+            status=ServiceRequestModel.Status.OPEN,
+        ).order_by("created_at", "id")
         return [self._to_entity(model) for model in models]

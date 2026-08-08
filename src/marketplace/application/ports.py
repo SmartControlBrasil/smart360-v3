@@ -6,6 +6,7 @@ from src.marketplace.domain.entities import (
     ProviderService,
     Service,
     ServiceCategory,
+    ServiceRequest,
 )
 
 
@@ -97,4 +98,30 @@ class ProviderServiceRepository(Protocol):
         self,
         service_id: UUID,
     ) -> list[ProviderService]:
+        ...
+
+
+class ServiceRequestRepository(Protocol):
+    def save(
+        self,
+        service_request: ServiceRequest,
+    ) -> ServiceRequest:
+        ...
+
+    def get_by_id(
+        self,
+        service_request_id: UUID,
+    ) -> ServiceRequest | None:
+        ...
+
+    def list_open_by_organization(
+        self,
+        organization_id: UUID,
+    ) -> list[ServiceRequest]:
+        ...
+
+    def list_open_by_service(
+        self,
+        service_id: UUID,
+    ) -> list[ServiceRequest]:
         ...
