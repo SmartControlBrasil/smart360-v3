@@ -447,6 +447,462 @@ Nunca assumir que output de LLM e confiavel.
 
 Preferir respostas estruturadas a texto livre para integracao de sistema.
 
+## Marketplace Monetization and Opportunity Distribution
+
+### 1. PRINCIPIO CENTRAL
+
+O Smart360 nao deve usar apenas mensalidade fixa e tambem nao deve depender exclusivamente de leilao.
+
+O modelo planejado e hibrido:
+
+- cadastro gratuito
+- assinatura opcional
+- creditos
+- cobranca por oportunidade comercial
+- preco variavel/dinamico da oportunidade
+- leilao somente quando houver concorrencia suficiente
+- futuras fontes adicionais de monetizacao
+
+A arquitetura deve ser desenhada desde o inicio para permitir essas modalidades sem acopla-las ao Matching Engine.
+
+### 2. SEPARACAO ENTRE MATCHING E MONETIZACAO
+
+Regra arquitetural obrigatoria:
+
+Matching determina adequacao.
+
+Monetization determina acesso e distribuicao comercial dentro dos candidatos elegiveis.
+
+Pagamento, assinatura, creditos ou lance nunca devem transformar um Provider tecnicamente inadequado em candidato adequado.
+
+Fluxo conceitual:
+
+ServiceRequest
+    |
+    v
+Candidate Discovery
+    |
+    v
+Eligible Providers
+    |
+    +--> Matching / Quality
+    |
+    +--> Monetization / Distribution
+    |
+    v
+Opportunity Access
+
+O dinheiro pode influenciar distribuicao/prioridade comercial somente depois da elegibilidade minima.
+
+### 3. CADASTRO GRATUITO
+
+O Provider deve poder entrar no ecossistema sem mensalidade obrigatoria.
+
+Objetivos:
+
+- reduzir barreira de entrada
+- aumentar liquidez do marketplace
+- formar rapidamente base de fornecedores
+- permitir construcao de reputacao
+- permitir descoberta organica
+
+Nao assumir que todo Provider sera assinante.
+
+Nao tornar subscription obrigatoria no dominio Provider.
+
+### 4. ASSINATURA OPCIONAL
+
+O Smart360 podera oferecer planos recorrentes.
+
+Exemplos conceituais:
+
+- Free
+- Pro
+- Business
+- Premium
+
+Os valores nao estao definidos ainda.
+
+Planos pagos poderao futuramente incluir beneficios como:
+
+- creditos mensais
+- desconto no custo das oportunidades
+- alertas antecipados
+- analytics
+- ferramentas comerciais
+- gestao de equipe
+- CRM
+- automacoes
+- recursos de IA
+- maior capacidade operacional
+- recursos premium
+
+Importante:
+
+Nao hardcodar precos de planos na arquitetura central.
+
+Pricing deve ser configuravel.
+
+### 5. CREDITOS
+
+O Smart360 podera possuir sistema de creditos.
+
+Creditos poderao ser:
+
+- comprados
+- incluidos em assinatura
+- concedidos promocionalmente
+- ganhos por campanhas/recompensas futuras
+- utilizados para desbloquear oportunidades
+
+Nao implementar wallet/payment prematuramente.
+
+Mas nao criar decisoes arquiteturais que impecam creditos no futuro.
+
+### 6. OPORTUNIDADE COMERCIAL
+
+ServiceRequest e Opportunity nao devem ser tratados necessariamente como a mesma coisa.
+
+ServiceRequest representa a demanda/necessidade do solicitante.
+
+Opportunity representa a exposicao/distribuicao comercial dessa demanda para Providers.
+
+Essa distincao deve ser preservada para futura modelagem.
+
+Exemplo:
+
+ServiceRequest:
+"Minha CNC esta com erro de encoder no eixo Y."
+
+A partir dela o sistema podera criar uma Opportunity comercial distribuida para candidatos elegiveis.
+
+Nao implementar Opportunity automaticamente apenas por esta atualizacao documental.
+
+### 7. PRIVACIDADE ANTES DO DESBLOQUEIO
+
+O Provider podera futuramente visualizar informacoes suficientes para avaliar a oportunidade sem necessariamente receber imediatamente os dados completos do solicitante.
+
+Exemplo de informacoes possivelmente visiveis antes do desbloqueio:
+
+- categoria
+- servico
+- problema
+- regiao aproximada
+- equipamento
+- fabricante
+- urgencia
+- faixa estimada do trabalho
+- qualidade/verificacao da demanda
+- quantidade de interessados
+
+Exemplos de informacoes que poderao permanecer protegidas ate autorizacao/desbloqueio:
+
+- nome completo
+- telefone
+- WhatsApp
+- e-mail
+- endereco exato
+- outros dados pessoais/comerciais sensiveis
+
+Essa politica devera respeitar LGPD e principios de minimizacao de dados.
+
+Nao implementar interface ou regras definitivas ainda.
+
+### 8. COBRANCA POR OPORTUNIDADE
+
+O Smart360 podera cobrar pelo acesso/desbloqueio de uma oportunidade comercial qualificada.
+
+O objeto economico nao deve ser conceitualmente tratado como simples "clique".
+
+Uma oportunidade pode ter valor muito superior a um clique publicitario porque ja representa intencao comercial estruturada.
+
+Nao usar CPC como conceito central da arquitetura.
+
+Usar conceitos proprios de marketplace, como:
+
+- Opportunity
+- OpportunityAccess
+- PricingPolicy
+- OpportunityPrice
+- CreditCost
+- Bid
+
+Os nomes definitivos serao decididos nas respectivas sprints.
+
+### 9. PRECO DINAMICO DA OPORTUNIDADE
+
+O custo de uma Opportunity podera variar.
+
+Possiveis sinais futuros:
+
+- categoria
+- servico
+- ticket estimado
+- urgencia
+- localizacao
+- oferta de Providers na regiao
+- quantidade de candidatos
+- concorrencia
+- qualidade da demanda
+- verificacao do solicitante
+- probabilidade de conversao
+- historico de conversoes
+- escassez
+- horario
+- complexidade
+- especializacao requerida
+
+Exemplo conceitual:
+
+base price
++ urgency
++ estimated economic value
++ scarcity
++ demand quality
++ competition
+= opportunity price
+
+Nao congelar formula ou pesos agora.
+
+O pricing deve futuramente ser implementado atraves de politica/servico proprio e nao espalhado pelos models.
+
+### 10. LEILAO
+
+Leilao nao sera obrigatorio para todas as oportunidades.
+
+Ele podera ser ativado somente quando fizer sentido economico, por exemplo:
+
+- multiplos Providers elegiveis
+- demanda concorrida
+- oferta limitada de vagas
+- oportunidade de maior valor
+
+O Provider podera futuramente definir um bid maximo.
+
+Mas o maior lance nao deve necessariamente vencer.
+
+O Smart360 deve combinar adequacao/qualidade com elementos comerciais.
+
+### 11. QUALITY BEFORE BID
+
+Regra forte:
+
+BID nao substitui QUALITY.
+
+Um Provider incompativel tecnicamente nao entra no matching apenas porque paga mais.
+
+Primeiro:
+
+Eligibility.
+
+Depois:
+
+Matching Quality.
+
+Depois:
+
+Commercial Distribution.
+
+Exemplo conceitual futuro:
+
+- Technical Match
+- Location
+- Reputation
+- Availability
+- Experience
+- Response Rate
+- Commercial Bid
+
+podem participar de uma decisao de distribuicao/ranking.
+
+Os pesos nao estao definidos e nao devem ser hardcoded agora.
+
+### 12. LIMITACAO DE ACESSOS A MESMA OPORTUNIDADE
+
+O Smart360 nao deve vender indiscriminadamente a mesma oportunidade para dezenas de Providers.
+
+Isso destroi:
+
+- confianca
+- taxa de conversao
+- percepcao de valor
+- reputacao do marketplace
+
+Deve existir futuramente um limite configuravel de acessos/compradores por Opportunity.
+
+Valor inicial conceitual para experimentacao:
+
+3 Providers
+
+Importante:
+
+Esse numero nao e uma regra fixa de dominio neste momento.
+
+Deve permanecer configuravel.
+
+### 13. ESCASSEZ E DISTRIBUICAO
+
+Uma Opportunity podera futuramente possuir:
+
+- numero maximo de acessos
+- quantidade de vagas restantes
+- janela de disponibilidade
+- preco atual
+- preco minimo
+- estado de distribuicao
+- inicio/fim do leilao
+- quantidade de interessados
+
+Esses conceitos deverao ser modelados apenas quando chegarmos a sprint especifica.
+
+Nao adicionar campos prematuros em ServiceRequest ou ProviderService.
+
+### 14. MRR + REVENUE VARIABLE
+
+O modelo hibrido busca combinar:
+
+Receita recorrente:
+
+- subscriptions / plans
+
+com:
+
+Receita variavel:
+
+- credits
+- opportunity unlock
+- dynamic pricing
+- auction/bid
+- sponsored placement
+- outros servicos
+
+Isso evita depender exclusivamente de uma unica fonte de receita.
+
+### 15. FUTURAS FONTES DE RECEITA
+
+A arquitetura deve permanecer aberta para:
+
+- assinaturas
+- creditos
+- oportunidade paga
+- leilao
+- comissao sobre contratacao
+- anuncios patrocinados
+- destaque de perfil
+- premium AI
+- cursos
+- treinamentos
+- certificacoes
+- marketplace de produtos
+- parceiros
+- servicos financeiros
+- seguros
+- afiliados
+- midia e videos patrocinados
+
+Esses itens nao fazem parte do MVP atual.
+
+Nao implementa-los antecipadamente.
+
+### 16. IA E PRICING FUTURO
+
+IA podera futuramente ajudar a estimar:
+
+- qualidade da demanda
+- ticket potencial
+- intencao real de contratacao
+- probabilidade de conversao
+- complexidade
+- urgencia
+- fraude/spam
+- valor esperado da oportunidade
+
+Mas:
+
+- IA nao deve controlar dinheiro sem politicas deterministicas/auditaveis
+- precos e decisoes financeiras precisam ser explicaveis e auditaveis
+- regras de fallback devem existir
+- provider deve poder entender por que determinada cobranca ocorreu
+
+Nao implementar IA de pricing agora.
+
+### 17. TELEMETRIA ECONOMICA
+
+Quando o modulo de monetizacao for construido, a arquitetura deve permitir registrar eventos como:
+
+- opportunity_created
+- opportunity_shown
+- opportunity_unlocked
+- opportunity_skipped
+- bid_placed
+- bid_won
+- bid_lost
+- credits_spent
+- opportunity_contacted
+- proposal_created
+- conversion
+- service_completed
+- refund
+- dispute
+
+Isso permitira futuramente medir:
+
+- conversion rate
+- cost per opportunity
+- cost per acquisition
+- provider ROI
+- marketplace take rate
+- LTV
+- CAC
+- fill rate
+- opportunity liquidity
+- revenue per request
+
+Nao implementar telemetria agora.
+
+### 18. REGRAS PARA FUTURAS SPRINTS
+
+Antes de implementar Candidate Discovery, Matching, Ranking ou Opportunity Distribution, verificar sempre:
+
+1. A funcionalidade pertence a elegibilidade tecnica ou monetizacao?
+2. Estamos misturando bid com capacidade tecnica?
+3. Estamos introduzindo preco em entidade errada?
+4. Estamos tornando subscription obrigatoria acidentalmente?
+5. Estamos expondo dados privados antes do necessario?
+6. Estamos permitindo compradores ilimitados para uma mesma demanda?
+7. Estamos hardcodando precos ou pesos que deveriam ser politicas configuraveis?
+8. Estamos criando dependencia de um gateway de pagamento no dominio?
+
+Se qualquer resposta indicar acoplamento indevido, parar e revisar a arquitetura.
+
+### 19. PRINCIPIO FINAL
+
+Registrar em destaque:
+
+"Matching determines suitability.
+Monetization determines commercial access and distribution among eligible candidates."
+
+Em portugues:
+
+"Matching determina adequacao.
+Monetizacao determina acesso e distribuicao comercial entre candidatos elegiveis."
+
+E tambem:
+
+"Complexidade economica nao deve contaminar o nucleo de elegibilidade tecnica."
+
+### Atualizacao da sequencia de desenvolvimento
+
+Apos ServiceRequest, a sequencia planejada passa conceitualmente a considerar:
+
+- 01E - ServiceRequest - concluida
+- 01F - Monetization Foundations / Opportunity Concepts
+- 01G - Candidate Discovery
+- 01H - Matching Score v1
+- 01I - Opportunity Distribution / Auction
+
+Essa sequencia ainda pode ser refinada conforme o dominio evoluir.
+
 ## 20. Provider de LLM
 
 O sistema deve permitir substituicao futura de provider.
