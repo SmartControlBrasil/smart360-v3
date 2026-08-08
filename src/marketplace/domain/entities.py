@@ -371,3 +371,45 @@ class RequestOpportunityAccessResult:
         else:
             if self.access is not None:
                 raise ValueError("access must be None when allowed is False.")
+
+
+@dataclass(frozen=True, slots=True)
+class Money:
+    amount_minor: int
+    currency: str
+
+    def __post_init__(self) -> None:
+        if self.amount_minor is None or isinstance(self.amount_minor, bool) or not isinstance(self.amount_minor, int):
+            raise ValueError("Money amount_minor must be an integer.")
+        if self.amount_minor < 0:
+            raise ValueError("Money amount_minor must be non-negative.")
+
+        if self.currency is None or not isinstance(self.currency, str):
+            raise ValueError("Money currency must be a string.")
+
+        normalized_currency = self.currency.strip().upper()
+        if not normalized_currency:
+            raise ValueError("Money currency cannot be empty.")
+        if len(normalized_currency) != 3 or not normalized_currency.isalpha():
+            raise ValueError("Money currency must be exactly 3 alphabetic characters.")
+
+        object.__setattr__(self, "currency", normalized_currency)
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityPricingQuote:
+    amount: Money
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.amount is None or not isinstance(self.amount, Money):
+            raise ValueError("OpportunityPricingQuote amount must be a Money instance.")
+
+        if self.reason is None or not isinstance(self.reason, str):
+            raise ValueError("OpportunityPricingQuote reason must be a string.")
+
+        normalized_reason = self.reason.strip()
+        if not normalized_reason:
+            raise ValueError("OpportunityPricingQuote reason cannot be empty.")
+
+        object.__setattr__(self, "reason", normalized_reason)

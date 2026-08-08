@@ -17,6 +17,7 @@ from src.marketplace.application.use_cases import (
     InviteProviderToOpportunity,
     RegisterOpportunityInterest,
     RequestOpportunityAccess,
+    QuoteOpportunityAccessPrice,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
@@ -34,6 +35,8 @@ from src.marketplace.domain.entities import (
     ServiceCategory,
     ServiceRequest,
     ServiceRequestStatus,
+    Money,
+    OpportunityPricingQuote,
 )
 from src.organizations.domain.entities import Organization
 
@@ -4126,3 +4129,479 @@ class RequestOpportunityAccessTests(SimpleTestCase):
         self.assertEqual(policy.last_invitation.id, invitation.id)
         self.assertEqual(policy.last_opportunity.id, opportunity.id)
         self.assertEqual(policy.last_provider.id, provider.id)
+
+
+class FakeOpportunityPricingPolicy:
+    def __init__(self, amount_minor: int = 2500, currency: str = "BRL", reason: str = "test_quote"):
+        self.amount_minor = amount_minor
+        self.currency = currency
+        self.reason = reason
+        self.call_count = 0
+        self.last_interest = None
+        self.last_invitation = None
+        self.last_opportunity = None
+        self.last_provider = None
+
+    def quote(
+        self,
+        *,
+        interest: OpportunityInterest,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> OpportunityPricingQuote:
+        self.call_count += 1
+        self.last_interest = interest
+        self.last_invitation = invitation
+        self.last_opportunity = opportunity
+        self.last_provider = provider
+        return OpportunityPricingQuote(
+            amount=Money(amount_minor=self.amount_minor, currency=self.currency),
+            reason=self.reason,
+        )
+
+
+class QuoteOpportunityAccessPriceTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        service_id: UUID,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=service_id,
+            title="Demanda tecnica",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _opportunity(
+        opportunity_id: UUID,
+        *,
+        service_request_id: UUID,
+        status: OpportunityStatus = OpportunityStatus.OPEN,
+    ) -> Opportunity:
+        now = datetime.now(timezone.utc)
+        return Opportunity(
+            id=opportunity_id,
+            service_request_id=service_request_id,
+            status=status,
+            max_accesses=3,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider",
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_invalid_interest_id_rejected(self):
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            opportunity_pricing_policy=FakeOpportunityPricingPolicy(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=None)
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id="invalid-uuid")
+
+    def test_nonexistent_interest_rejected(self):
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            opportunity_pricing_policy=FakeOpportunityPricingPolicy(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=uuid4())
+
+    def test_closed_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CLOSED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=FakeOpportunityPricingPolicy(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id)
+
+    def test_cancelled_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CANCELLED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=FakeOpportunityPricingPolicy(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id)
+
+    def test_inactive_provider_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4(), is_active=False)
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=FakeOpportunityPricingPolicy(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id)
+
+    def test_existing_opportunity_access_rejected_before_pricing_policy_call(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        access_repo.save(
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        policy = FakeOpportunityPricingPolicy()
+
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=policy,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id)
+
+        self.assertEqual(policy.call_count, 0)
+
+    def test_critical_semantic_pricing_test(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        policy = FakeOpportunityPricingPolicy(amount_minor=2500, currency="BRL", reason="test_quote")
+
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=policy,
+        )
+        quote = use_case.execute(interest_id=interest.id)
+
+        self.assertEqual(quote.amount.amount_minor, 2500)
+        self.assertEqual(quote.amount.currency, "BRL")
+        self.assertEqual(quote.reason, "test_quote")
+        self.assertEqual(len(access_repo._items), 0)
+        self.assertEqual(policy.call_count, 1)
+
+        self.assertEqual(policy.last_interest.id, interest.id)
+        self.assertEqual(policy.last_invitation.id, invitation.id)
+        self.assertEqual(policy.last_opportunity.id, opportunity.id)
+        self.assertEqual(policy.last_provider.id, provider.id)
+
+    def test_zero_price_test(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        policy = FakeOpportunityPricingPolicy(amount_minor=0, currency="BRL", reason="test_free")
+
+        use_case = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=policy,
+        )
+        quote = use_case.execute(interest_id=interest.id)
+
+        self.assertEqual(quote.amount.amount_minor, 0)
+        self.assertEqual(quote.amount.currency, "BRL")
+        self.assertEqual(quote.reason, "test_free")
+        self.assertEqual(len(access_repo._items), 0)
+        self.assertEqual(policy.call_count, 1)
+
+    def test_regression_flows_remain_independent(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        # 1. RegisterOpportunityInterest creates Interest but NO Access
+        register_usecase = RegisterOpportunityInterest(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_interest_repository=int_repo,
+        )
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = register_usecase.execute(invitation_id=invitation.id)
+        self.assertIsNotNone(interest)
+        self.assertEqual(len(access_repo._items), 0)
+
+        # 2. QuoteOpportunityAccessPrice returns Quote but NO Access
+        quote_usecase = QuoteOpportunityAccessPrice(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            opportunity_pricing_policy=FakeOpportunityPricingPolicy(amount_minor=1000),
+        )
+        quote = quote_usecase.execute(interest_id=interest.id)
+        self.assertEqual(quote.amount.amount_minor, 1000)
+        self.assertEqual(len(access_repo._items), 0)
+
+        # 3. RequestOpportunityAccess using DENIED entitlement policy creates NO Access
+        ent_policy_denied = FakeAccessEntitlementPolicy(allowed=False, reason="denied")
+        request_usecase_denied = RequestOpportunityAccess(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            access_entitlement_policy=ent_policy_denied,
+            grant_opportunity_access=GrantOpportunityAccess(opp_repo, access_repo, p_repo),
+        )
+        result_denied = request_usecase_denied.execute(interest_id=interest.id)
+        self.assertFalse(result_denied.decision.allowed)
+        self.assertIsNone(result_denied.access)
+        self.assertEqual(len(access_repo._items), 0)
+
+        # 4. RequestOpportunityAccess using ALLOWED entitlement policy creates Access
+        ent_policy_allowed = FakeAccessEntitlementPolicy(allowed=True, reason="allowed")
+        request_usecase_allowed = RequestOpportunityAccess(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            access_entitlement_policy=ent_policy_allowed,
+            grant_opportunity_access=GrantOpportunityAccess(opp_repo, access_repo, p_repo),
+        )
+        result_allowed = request_usecase_allowed.execute(interest_id=interest.id)
+        self.assertTrue(result_allowed.decision.allowed)
+        self.assertIsNotNone(result_allowed.access)
+        self.assertEqual(len(access_repo._items), 1)

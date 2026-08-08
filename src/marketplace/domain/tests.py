@@ -19,6 +19,8 @@ from src.marketplace.domain.entities import (
     ServiceRequestStatus,
     AccessEntitlementDecision,
     RequestOpportunityAccessResult,
+    Money,
+    OpportunityPricingQuote,
 )
 
 
@@ -983,3 +985,97 @@ class RequestOpportunityAccessResultTests(SimpleTestCase):
             result.decision = AccessEntitlementDecision(allowed=False, reason="denied")
         with self.assertRaises(FrozenInstanceError):
             result.access = None
+
+
+class MoneyTests(SimpleTestCase):
+    def test_valid_zero_amount(self):
+        m = Money(amount_minor=0, currency="BRL")
+        self.assertEqual(m.amount_minor, 0)
+        self.assertEqual(m.currency, "BRL")
+
+    def test_valid_positive_amount(self):
+        m = Money(amount_minor=2500, currency="USD")
+        self.assertEqual(m.amount_minor, 2500)
+        self.assertEqual(m.currency, "USD")
+
+    def test_negative_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            Money(amount_minor=-10, currency="BRL")
+
+    def test_float_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            Money(amount_minor=25.90, currency="BRL")
+
+    def test_bool_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            Money(amount_minor=True, currency="BRL")
+
+    def test_none_amount_rejected(self):
+        with self.assertRaises(ValueError):
+            Money(amount_minor=None, currency="BRL")
+
+    def test_currency_normalized(self):
+        m1 = Money(amount_minor=100, currency="brl")
+        self.assertEqual(m1.currency, "BRL")
+        m2 = Money(amount_minor=100, currency=" USD ")
+        self.assertEqual(m2.currency, "USD")
+
+    def test_invalid_currency_rejected(self):
+        with self.assertRaises(ValueError):
+            Money(amount_minor=100, currency="")
+        with self.assertRaises(ValueError):
+            Money(amount_minor=100, currency="R$")
+        with self.assertRaises(ValueError):
+            Money(amount_minor=100, currency="REAL")
+        with self.assertRaises(ValueError):
+            Money(amount_minor=100, currency=123)
+        with self.assertRaises(ValueError):
+            Money(amount_minor=100, currency=None)
+
+    def test_immutable_after_creation(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(FrozenInstanceError):
+            m.amount_minor = 200
+        with self.assertRaises(FrozenInstanceError):
+            m.currency = "USD"
+
+
+class OpportunityPricingQuoteTests(SimpleTestCase):
+    def test_valid_quote(self):
+        m = Money(amount_minor=2500, currency="BRL")
+        quote = OpportunityPricingQuote(amount=m, reason="test_quote")
+        self.assertEqual(quote.amount, m)
+        self.assertEqual(quote.reason, "test_quote")
+
+    def test_money_required(self):
+        with self.assertRaises(ValueError):
+            OpportunityPricingQuote(amount=None, reason="test")
+
+    def test_invalid_reason_type_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            OpportunityPricingQuote(amount=m, reason=123)
+
+    def test_empty_reason_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            OpportunityPricingQuote(amount=m, reason="")
+
+    def test_whitespace_reason_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            OpportunityPricingQuote(amount=m, reason="   ")
+
+    def test_reason_normalized(self):
+        m = Money(amount_minor=100, currency="BRL")
+        quote = OpportunityPricingQuote(amount=m, reason="  test_quote  ")
+        self.assertEqual(quote.reason, "test_quote")
+
+    def test_immutable_after_creation(self):
+        m1 = Money(amount_minor=100, currency="BRL")
+        m2 = Money(amount_minor=200, currency="USD")
+        quote = OpportunityPricingQuote(amount=m1, reason="test")
+        with self.assertRaises(FrozenInstanceError):
+            quote.amount = m2
+        with self.assertRaises(FrozenInstanceError):
+            quote.reason = "modified"

@@ -13,6 +13,7 @@ from src.marketplace.domain.entities import (
     ServiceCategory,
     ServiceRequest,
     AccessEntitlementDecision,
+    OpportunityPricingQuote,
 )
 
 
@@ -255,4 +256,16 @@ class AccessEntitlementPolicy(Protocol):
         opportunity: Opportunity,
         provider: Provider,
     ) -> AccessEntitlementDecision:
+        ...
+
+
+class OpportunityPricingPolicy(Protocol):
+    def quote(
+        self,
+        *,
+        interest: OpportunityInterest,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> OpportunityPricingQuote:
         ...
