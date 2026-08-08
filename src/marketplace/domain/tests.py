@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -16,6 +17,8 @@ from src.marketplace.domain.entities import (
     ServiceCategory,
     ServiceRequest,
     ServiceRequestStatus,
+    AccessEntitlementDecision,
+    RequestOpportunityAccessResult,
 )
 
 
@@ -888,3 +891,95 @@ class OpportunityInterestDomainTests(SimpleTestCase):
                 invitation_id=uuid4(),
                 created_at=datetime.now(),
             )
+
+
+class AccessEntitlementDecisionTests(SimpleTestCase):
+    def test_allowed_true_accepted(self):
+        decision = AccessEntitlementDecision(allowed=True, reason="test_allowed")
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "test_allowed")
+
+    def test_allowed_false_accepted(self):
+        decision = AccessEntitlementDecision(allowed=False, reason="test_denied")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "test_denied")
+
+    def test_non_bool_rejected(self):
+        with self.assertRaises(ValueError):
+            AccessEntitlementDecision(allowed=None, reason="test")
+        with self.assertRaises(ValueError):
+            AccessEntitlementDecision(allowed=1, reason="test")
+
+    def test_invalid_reason_rejected(self):
+        with self.assertRaises(ValueError):
+            AccessEntitlementDecision(allowed=True, reason=None)
+        with self.assertRaises(ValueError):
+            AccessEntitlementDecision(allowed=True, reason=123)
+
+    def test_empty_reason_rejected(self):
+        with self.assertRaises(ValueError):
+            AccessEntitlementDecision(allowed=True, reason="")
+        with self.assertRaises(ValueError):
+            AccessEntitlementDecision(allowed=True, reason="   ")
+
+    def test_reason_stripped(self):
+        decision = AccessEntitlementDecision(allowed=True, reason="  test_allowed  ")
+        self.assertEqual(decision.reason, "test_allowed")
+
+
+class RequestOpportunityAccessResultTests(SimpleTestCase):
+    def test_allowed_with_access_is_valid(self):
+        now = datetime.now(timezone.utc)
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=now,
+        )
+        decision = AccessEntitlementDecision(allowed=True, reason="test")
+        result = RequestOpportunityAccessResult(decision=decision, access=access)
+        self.assertEqual(result.access, access)
+
+    def test_denied_with_no_access_is_valid(self):
+        decision = AccessEntitlementDecision(allowed=False, reason="test")
+        result = RequestOpportunityAccessResult(decision=decision, access=None)
+        self.assertIsNone(result.access)
+
+    def test_allowed_with_no_access_rejected(self):
+        decision = AccessEntitlementDecision(allowed=True, reason="test")
+        with self.assertRaises(ValueError):
+            RequestOpportunityAccessResult(decision=decision, access=None)
+
+    def test_denied_with_access_rejected(self):
+        now = datetime.now(timezone.utc)
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=now,
+        )
+        decision = AccessEntitlementDecision(allowed=False, reason="test")
+        with self.assertRaises(ValueError):
+            RequestOpportunityAccessResult(decision=decision, access=access)
+
+    def test_decision_immutability(self):
+        decision = AccessEntitlementDecision(allowed=True, reason="test_allowed")
+        with self.assertRaises(FrozenInstanceError):
+            decision.allowed = False
+        with self.assertRaises(FrozenInstanceError):
+            decision.reason = "modified"
+
+    def test_result_immutability(self):
+        now = datetime.now(timezone.utc)
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=now,
+        )
+        decision = AccessEntitlementDecision(allowed=True, reason="test")
+        result = RequestOpportunityAccessResult(decision=decision, access=access)
+        with self.assertRaises(FrozenInstanceError):
+            result.decision = AccessEntitlementDecision(allowed=False, reason="denied")
+        with self.assertRaises(FrozenInstanceError):
+            result.access = None

@@ -12,6 +12,7 @@ from src.marketplace.domain.entities import (
     Service,
     ServiceCategory,
     ServiceRequest,
+    AccessEntitlementDecision,
 )
 
 
@@ -242,4 +243,16 @@ class OpportunityInterestRepository(Protocol):
         self,
         invitation_id: UUID,
     ) -> OpportunityInterest | None:
+        ...
+
+
+class AccessEntitlementPolicy(Protocol):
+    def decide(
+        self,
+        *,
+        interest: OpportunityInterest,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> AccessEntitlementDecision:
         ...

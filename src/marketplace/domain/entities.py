@@ -334,3 +334,40 @@ class OpportunityInterest:
             raise ValueError("OpportunityInterest created_at must be a datetime instance.")
         if self.created_at.tzinfo is None:
             raise ValueError("OpportunityInterest created_at must be timezone-aware.")
+
+
+@dataclass(frozen=True, slots=True)
+class AccessEntitlementDecision:
+    allowed: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.allowed is None or not isinstance(self.allowed, bool):
+            raise ValueError("AccessEntitlementDecision allowed must be a boolean.")
+
+        if self.reason is None or not isinstance(self.reason, str):
+            raise ValueError("AccessEntitlementDecision reason must be a string.")
+
+        normalized_reason = self.reason.strip()
+        if not normalized_reason:
+            raise ValueError("AccessEntitlementDecision reason cannot be empty.")
+
+        # In Python dataclass, slots are used, but we can set using object.__setattr__
+        object.__setattr__(self, "reason", normalized_reason)
+
+
+@dataclass(frozen=True, slots=True)
+class RequestOpportunityAccessResult:
+    decision: AccessEntitlementDecision
+    access: OpportunityAccess | None
+
+    def __post_init__(self) -> None:
+        if self.decision is None or not isinstance(self.decision, AccessEntitlementDecision):
+            raise ValueError("decision must be an AccessEntitlementDecision instance.")
+
+        if self.decision.allowed:
+            if self.access is None or not isinstance(self.access, OpportunityAccess):
+                raise ValueError("access is required and must be an OpportunityAccess instance when allowed is True.")
+        else:
+            if self.access is not None:
+                raise ValueError("access must be None when allowed is False.")

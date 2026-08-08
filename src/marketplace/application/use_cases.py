@@ -12,6 +12,7 @@ from src.marketplace.application.ports import (
     ServiceRequestRepository,
     ServiceCategoryRepository,
     ServiceRepository,
+    AccessEntitlementPolicy,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -26,6 +27,8 @@ from src.marketplace.domain.entities import (
     ServiceCategory,
     ServiceRequest,
     ServiceRequestStatus,
+    AccessEntitlementDecision,
+    RequestOpportunityAccessResult,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -716,3 +719,74 @@ class RegisterOpportunityInterest:
             created_at=datetime.now(timezone.utc),
         )
         return self.opportunity_interest_repository.save(interest)
+
+
+class RequestOpportunityAccess:
+    def __init__(
+        self,
+        opportunity_interest_repository: OpportunityInterestRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
+        opportunity_repository: OpportunityRepository,
+        provider_repository: ProviderRepository,
+        opportunity_access_repository: OpportunityAccessRepository,
+        access_entitlement_policy: AccessEntitlementPolicy,
+        grant_opportunity_access: GrantOpportunityAccess,
+    ):
+        self.opportunity_interest_repository = opportunity_interest_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
+        self.opportunity_repository = opportunity_repository
+        self.provider_repository = provider_repository
+        self.opportunity_access_repository = opportunity_access_repository
+        self.access_entitlement_policy = access_entitlement_policy
+        self.grant_opportunity_access = grant_opportunity_access
+
+    def execute(
+        self,
+        *,
+        interest_id: UUID,
+    ) -> RequestOpportunityAccessResult:
+        if interest_id is None or not isinstance(interest_id, UUID):
+            raise ValueError("Interest id is required and must be a UUID instance.")
+
+        interest = self.opportunity_interest_repository.get_by_id(interest_id)
+        if interest is None:
+            raise ValueError("OpportunityInterest does not exist.")
+
+        invitation = self.opportunity_invitation_repository.get_by_id(interest.invitation_id)
+        if invitation is None:
+            raise ValueError("OpportunityInvitation does not exist.")
+
+        opportunity = self.opportunity_repository.get_by_id(invitation.opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        provider = self.provider_repository.get_by_id(invitation.provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        existing_access = self.opportunity_access_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+        )
+        if existing_access is not None:
+            raise ValueError("OpportunityAccess already exists for this provider and opportunity.")
+
+        decision = self.access_entitlement_policy.decide(
+            interest=interest,
+            invitation=invitation,
+            opportunity=opportunity,
+            provider=provider,
+        )
+
+        access = None
+        if decision.allowed:
+            access = self.grant_opportunity_access.execute(
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+            )
+
+        return RequestOpportunityAccessResult(decision=decision, access=access)
