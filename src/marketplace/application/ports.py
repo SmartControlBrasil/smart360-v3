@@ -2,6 +2,7 @@ from typing import Protocol
 from uuid import UUID
 
 from src.marketplace.domain.entities import (
+    MatchingResult,
     Opportunity,
     OpportunityAccess,
     Provider,
@@ -173,4 +174,14 @@ class OpportunityAccessRepository(Protocol):
         ...
 
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
+        ...
+
+
+class MatchingPolicy(Protocol):
+    def evaluate(
+        self,
+        *,
+        service_request: ServiceRequest,
+        provider: Provider,
+    ) -> MatchingResult:
         ...

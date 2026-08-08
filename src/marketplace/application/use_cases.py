@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from src.marketplace.application.ports import (
+    MatchingPolicy,
     OpportunityAccessRepository,
     OpportunityRepository,
     ProviderRepository,
@@ -11,6 +12,7 @@ from src.marketplace.application.ports import (
     ServiceRepository,
 )
 from src.marketplace.domain.entities import (
+    MatchingResult,
     Opportunity,
     OpportunityAccess,
     OpportunityStatus,
@@ -489,3 +491,52 @@ class GrantOpportunityAccess:
             created_at=datetime.now(timezone.utc),
         )
         return self.opportunity_access_repository.save(access)
+
+
+class RankCandidates:
+    def __init__(
+        self,
+        discover_candidates: DiscoverCandidates,
+        service_request_repository: ServiceRequestRepository,
+        matching_policy: MatchingPolicy,
+    ):
+        self.discover_candidates = discover_candidates
+        self.service_request_repository = service_request_repository
+        self.matching_policy = matching_policy
+
+    def execute(
+        self,
+        *,
+        service_request_id: UUID,
+    ) -> list[MatchingResult]:
+        if service_request_id is None:
+            raise ValueError("ServiceRequest id is required.")
+        if not isinstance(service_request_id, UUID):
+            raise ValueError("ServiceRequest id must be a valid UUID instance.")
+
+        # Let DiscoverCandidates run validation on service_request status/existence
+        # and fetch technical candidates.
+        providers = self.discover_candidates.execute(service_request_id=service_request_id)
+
+        # Retrieve the service request domain object to pass context to the matching policy.
+        service_request = self.service_request_repository.get_by_id(service_request_id)
+        if service_request is None:
+            raise ValueError("ServiceRequest does not exist.")
+
+        results = [
+            self.matching_policy.evaluate(service_request=service_request, provider=provider)
+            for provider in providers
+        ]
+
+        # Deterministic ordering:
+        # 1. score descending
+        # 2. display_name casefold() (case-insensitive alphabetical)
+        # 3. provider.id string
+        return sorted(
+            results,
+            key=lambda res: (
+                -res.score,
+                res.provider.display_name.casefold(),
+                str(res.provider.id),
+            ),
+        )

@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from django.test import SimpleTestCase
 
+from src.marketplace.application.matching import TechnicalMatchingPolicyV1
 from src.marketplace.application.use_cases import (
     CreateOpportunity,
     CreateProvider,
@@ -12,8 +13,10 @@ from src.marketplace.application.use_cases import (
     CreateServiceRequest,
     DiscoverCandidates,
     GrantOpportunityAccess,
+    RankCandidates,
 )
 from src.marketplace.domain.entities import (
+    MatchingResult,
     Opportunity,
     OpportunityAccess,
     OpportunityStatus,
@@ -2333,3 +2336,342 @@ class GrantOpportunityAccessTests(SimpleTestCase):
             provider_id=second_provider.id,
         )
         self.assertEqual(granted.provider_id, second_provider.id)
+
+
+class TechnicalMatchingPolicyV1Tests(SimpleTestCase):
+    @staticmethod
+    def _service_request() -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider() -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="desc",
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_eligible_provider_produces_matching_result_with_score_100_and_reason(self):
+        policy = TechnicalMatchingPolicyV1()
+        request = self._service_request()
+        provider = self._provider()
+
+        result = policy.evaluate(service_request=request, provider=provider)
+
+        self.assertIsInstance(result, MatchingResult)
+        self.assertEqual(result.provider, provider)
+        self.assertEqual(result.score, 100)
+        self.assertEqual(result.reasons, ("technical_service_match",))
+
+
+class FakeMatchingPolicy:
+    def __init__(self, custom_scores: dict[UUID, int]):
+        self.custom_scores = custom_scores
+
+    def evaluate(self, *, service_request: ServiceRequest, provider: Provider) -> MatchingResult:
+        score = self.custom_scores.get(provider.id, 100)
+        return MatchingResult(
+            provider=provider,
+            score=score,
+            reasons=("fake_test_reason",)
+        )
+
+
+class RankCandidatesTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        service_id: UUID,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=service_id,
+            title="Demanda tecnica",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        display_name: str,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name=display_name,
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider_service(
+        *,
+        provider_id: UUID,
+        service_id: UUID,
+        is_active: bool = True,
+    ) -> ProviderService:
+        now = datetime.now(timezone.utc)
+        return ProviderService(
+            id=uuid4(),
+            provider_id=provider_id,
+            service_id=service_id,
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_single_eligible_candidate_returns_one_result(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        provider = self._provider(uuid4(), display_name="Provider X")
+        capability = self._provider_service(provider_id=provider.id, service_id=service_id)
+
+        req_repo.save(request)
+        p_repo.save(provider)
+        ps_repo.save(capability)
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        results = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].provider.id, provider.id)
+        self.assertEqual(results[0].score, 100)
+        self.assertEqual(results[0].reasons, ("technical_service_match",))
+
+    def test_no_candidates_returns_empty_list(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        req_repo.save(request)
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        results = use_case.execute(service_request_id=request.id)
+        self.assertEqual(results, [])
+
+    def test_multiple_candidates_all_scored_and_deterministically_tied_ordered(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        req_repo.save(request)
+
+        p1 = self._provider(uuid4(), display_name="Acme Corp")
+        p2 = self._provider(uuid4(), display_name="acme")
+        p3 = self._provider(uuid4(), display_name="Beta")
+
+        for p in [p1, p2, p3]:
+            p_repo.save(p)
+            ps_repo.save(self._provider_service(provider_id=p.id, service_id=service_id))
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        results = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0].provider.display_name, "acme")
+        self.assertEqual(results[1].provider.display_name, "Acme Corp")
+        self.assertEqual(results[2].provider.display_name, "Beta")
+
+        for res in results:
+            self.assertEqual(res.score, 100)
+            self.assertEqual(res.reasons, ("technical_service_match",))
+
+    def test_policy_substitution_works(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        req_repo.save(request)
+
+        p_low = self._provider(uuid4(), display_name="Provider Low Score")
+        p_high = self._provider(uuid4(), display_name="Provider High Score")
+
+        for p in [p_low, p_high]:
+            p_repo.save(p)
+            ps_repo.save(self._provider_service(provider_id=p.id, service_id=service_id))
+
+        fake_policy = FakeMatchingPolicy({
+            p_low.id: 40,
+            p_high.id: 90,
+        })
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=fake_policy,
+        )
+
+        results = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].provider.id, p_high.id)
+        self.assertEqual(results[0].score, 90)
+        self.assertEqual(results[1].provider.id, p_low.id)
+        self.assertEqual(results[1].score, 40)
+
+    def test_inactive_providers_are_ignored(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        req_repo.save(request)
+
+        p_inactive = self._provider(uuid4(), display_name="Inactive Provider", is_active=False)
+        p_repo.save(p_inactive)
+        ps_repo.save(self._provider_service(provider_id=p_inactive.id, service_id=service_id))
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        results = use_case.execute(service_request_id=request.id)
+        self.assertEqual(results, [])
+
+    def test_closed_service_request_is_rejected(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4(), status=ServiceRequestStatus.CLOSED)
+        req_repo.save(request)
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=request.id)
+
+    def test_cancelled_service_request_is_rejected(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4(), status=ServiceRequestStatus.CANCELLED)
+        req_repo.save(request)
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=request.id)
+
+    def test_invalid_service_request_id_is_rejected(self):
+        req_repo = InMemoryServiceRequestRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+        p_repo = InMemoryProviderRepository()
+
+        discovery = DiscoverCandidates(
+            service_request_repository=req_repo,
+            provider_service_repository=ps_repo,
+            provider_repository=p_repo,
+        )
+        use_case = RankCandidates(
+            discover_candidates=discovery,
+            service_request_repository=req_repo,
+            matching_policy=TechnicalMatchingPolicyV1(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=None)
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id="invalid-uuid")

@@ -4,6 +4,7 @@ from uuid import uuid4
 from django.test import SimpleTestCase
 
 from src.marketplace.domain.entities import (
+    MatchingResult,
     Opportunity,
     OpportunityAccess,
     OpportunityStatus,
@@ -656,3 +657,118 @@ class OpportunityAccessDomainTests(SimpleTestCase):
                 provider_id="invalid-uuid",
                 created_at=datetime.now(timezone.utc),
             )
+
+
+class MatchingResultDomainTests(SimpleTestCase):
+    @staticmethod
+    def _valid_provider() -> Provider:
+        return Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Test Provider",
+            slug="test-provider",
+            description="desc",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def test_valid_matching_result(self):
+        provider = self._valid_provider()
+        res = MatchingResult(
+            provider=provider,
+            score=100,
+            reasons=("technical_service_match",)
+        )
+        self.assertEqual(res.provider, provider)
+        self.assertEqual(res.score, 100)
+        self.assertEqual(res.reasons, ("technical_service_match",))
+
+    def test_provider_must_be_provider_instance(self):
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider="not-a-provider-object",
+                score=100,
+                reasons=("technical_service_match",)
+            )
+
+    def test_score_below_zero_rejected(self):
+        provider = self._valid_provider()
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider=provider,
+                score=-1,
+                reasons=("technical_service_match",)
+            )
+
+    def test_score_above_100_rejected(self):
+        provider = self._valid_provider()
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider=provider,
+                score=101,
+                reasons=("technical_service_match",)
+            )
+
+    def test_score_non_int_rejected(self):
+        provider = self._valid_provider()
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider=provider,
+                score=99.5,
+                reasons=("technical_service_match",)
+            )
+
+    def test_score_bool_rejected(self):
+        provider = self._valid_provider()
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider=provider,
+                score=True,
+                reasons=("technical_service_match",)
+            )
+
+    def test_empty_reasons_rejected(self):
+        provider = self._valid_provider()
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider=provider,
+                score=100,
+                reasons=()
+            )
+
+    def test_blank_reason_rejected(self):
+        provider = self._valid_provider()
+        with self.assertRaises(ValueError):
+            MatchingResult(
+                provider=provider,
+                score=100,
+                reasons=("   ",)
+            )
+
+    def test_reasons_normalized_by_stripping_whitespace(self):
+        provider = self._valid_provider()
+        res = MatchingResult(
+            provider=provider,
+            score=100,
+            reasons=("  technical_service_match  ", " another_reason ")
+        )
+        self.assertEqual(res.reasons, ("technical_service_match", "another_reason"))
+
+    def test_valid_score_boundary_zero(self):
+        provider = self._valid_provider()
+        res = MatchingResult(
+            provider=provider,
+            score=0,
+            reasons=("some_reason",)
+        )
+        self.assertEqual(res.score, 0)
+
+    def test_valid_score_boundary_100(self):
+        provider = self._valid_provider()
+        res = MatchingResult(
+            provider=provider,
+            score=100,
+            reasons=("some_reason",)
+        )
+        self.assertEqual(res.score, 100)

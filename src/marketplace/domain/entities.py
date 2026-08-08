@@ -263,3 +263,37 @@ class OpportunityAccess:
             raise ValueError(
                 "OpportunityAccess provider_id must be a valid UUID instance."
             )
+
+
+@dataclass(slots=True, frozen=True)
+class MatchingResult:
+    provider: Provider
+    score: int
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider, Provider):
+            raise ValueError("MatchingResult provider must be a Provider domain object.")
+
+        if isinstance(self.score, bool) or not isinstance(self.score, int):
+            raise ValueError("MatchingResult score must be an integer.")
+
+        if not (0 <= self.score <= 100):
+            raise ValueError("MatchingResult score must be between 0 and 100.")
+
+        if not isinstance(self.reasons, tuple):
+            raise ValueError("MatchingResult reasons must be a tuple of strings.")
+
+        if not self.reasons:
+            raise ValueError("MatchingResult reasons cannot be empty.")
+
+        normalized_reasons: list[str] = []
+        for reason in self.reasons:
+            if not isinstance(reason, str):
+                raise ValueError("MatchingResult reason must be a string.")
+            normalized = reason.strip()
+            if not normalized:
+                raise ValueError("MatchingResult reason cannot be empty or blank.")
+            normalized_reasons.append(normalized)
+
+        object.__setattr__(self, "reasons", tuple(normalized_reasons))
