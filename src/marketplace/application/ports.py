@@ -1,7 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
-from src.marketplace.domain.entities import ServiceCategory
+from src.marketplace.domain.entities import Service, ServiceCategory
 
 
 class ServiceCategoryRepository(Protocol):
@@ -21,4 +21,25 @@ class ServiceCategoryRepository(Protocol):
         ...
 
     def list_active(self) -> list[ServiceCategory]:
+        ...
+
+
+class ServiceRepository(Protocol):
+    def save(self, service: Service) -> Service:
+        ...
+
+    def get_by_id(self, service_id: UUID) -> Service | None:
+        ...
+
+    def get_by_category_and_slug(
+        self,
+        category_id: UUID,
+        slug: str,
+    ) -> Service | None:
+        ...
+
+    def list_active_by_category(
+        self,
+        category_id: UUID,
+    ) -> list[Service]:
         ...
