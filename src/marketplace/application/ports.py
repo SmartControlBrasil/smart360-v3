@@ -16,6 +16,7 @@ from src.marketplace.domain.entities import (
     OpportunityPricingQuote,
     EconomicSettlement,
     CreditWallet,
+    CreditLedgerEntry,
 )
 
 
@@ -310,4 +311,24 @@ class CreditWalletRepository(Protocol):
         self,
         organization_id: UUID,
     ) -> CreditWallet | None:
+        ...
+
+
+class CreditLedgerEntryRepository(Protocol):
+    def save(
+        self,
+        entry: CreditLedgerEntry,
+    ) -> CreditLedgerEntry:
+        ...
+
+    def get_by_id(
+        self,
+        entry_id: UUID,
+    ) -> CreditLedgerEntry | None:
+        ...
+
+    def list_by_wallet(
+        self,
+        wallet_id: UUID,
+    ) -> list[CreditLedgerEntry]:
         ...

@@ -487,3 +487,52 @@ class CreditWallet:
             raise ValueError("current_time cannot be before updated_at.")
         self.is_active = False
         self.updated_at = current_time
+
+
+class CreditLedgerDirection(StrEnum):
+    CREDIT = "credit"
+    DEBIT = "debit"
+
+
+@dataclass(frozen=True, slots=True)
+class CreditLedgerEntry:
+    id: UUID
+    wallet_id: UUID
+    direction: CreditLedgerDirection
+    units: int
+    reason: str
+    reference: str | None
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.id is None or not isinstance(self.id, UUID):
+            raise ValueError("CreditLedgerEntry id must be a valid UUID instance.")
+        if self.wallet_id is None or not isinstance(self.wallet_id, UUID):
+            raise ValueError("CreditLedgerEntry wallet_id must be a valid UUID instance.")
+        if self.direction is None or not isinstance(self.direction, CreditLedgerDirection):
+            raise ValueError("CreditLedgerEntry direction must be a CreditLedgerDirection instance.")
+
+        if self.units is None or isinstance(self.units, bool) or not isinstance(self.units, int):
+            raise ValueError("CreditLedgerEntry units must be an integer.")
+        if self.units <= 0:
+            raise ValueError("CreditLedgerEntry units must be positive (> 0).")
+
+        if self.reason is None or not isinstance(self.reason, str):
+            raise ValueError("CreditLedgerEntry reason must be a string.")
+        normalized_reason = self.reason.strip()
+        if not normalized_reason:
+            raise ValueError("CreditLedgerEntry reason cannot be empty.")
+        object.__setattr__(self, "reason", normalized_reason)
+
+        if self.reference is not None:
+            if not isinstance(self.reference, str):
+                raise ValueError("CreditLedgerEntry reference must be None or a string.")
+            normalized_ref = self.reference.strip()
+            if not normalized_ref:
+                raise ValueError("CreditLedgerEntry reference cannot be empty when supplied.")
+            object.__setattr__(self, "reference", normalized_ref)
+
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("CreditLedgerEntry created_at must be a datetime instance.")
+        if self.created_at.tzinfo is None:
+            raise ValueError("CreditLedgerEntry created_at must be timezone-aware.")

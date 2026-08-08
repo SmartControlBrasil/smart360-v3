@@ -16,6 +16,7 @@ from src.marketplace.application.ports import (
     OpportunityPricingPolicy,
     EconomicSettlementRepository,
     CreditWalletRepository,
+    CreditLedgerEntryRepository,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -37,6 +38,8 @@ from src.marketplace.domain.entities import (
     SettlementMethod,
     EconomicSettlement,
     CreditWallet,
+    CreditLedgerDirection,
+    CreditLedgerEntry,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -970,3 +973,125 @@ class CreateCreditWallet:
             updated_at=now,
         )
         return self.credit_wallet_repository.save(wallet)
+
+
+class GetCreditWalletBalance:
+    def __init__(
+        self,
+        credit_wallet_repository: CreditWalletRepository,
+        credit_ledger_entry_repository: CreditLedgerEntryRepository,
+    ):
+        self.credit_wallet_repository = credit_wallet_repository
+        self.credit_ledger_entry_repository = credit_ledger_entry_repository
+
+    def execute(self, *, wallet_id: UUID) -> int:
+        if wallet_id is None or not isinstance(wallet_id, UUID):
+            raise ValueError("Wallet id is required and must be a UUID instance.")
+
+        wallet = self.credit_wallet_repository.get_by_id(wallet_id)
+        if wallet is None:
+            raise ValueError("CreditWallet does not exist.")
+
+        entries = self.credit_ledger_entry_repository.list_by_wallet(wallet_id)
+        balance = 0
+        for entry in entries:
+            if entry.direction is CreditLedgerDirection.CREDIT:
+                balance += entry.units
+            elif entry.direction is CreditLedgerDirection.DEBIT:
+                balance -= entry.units
+        return balance
+
+
+class RecordCredit:
+    def __init__(
+        self,
+        credit_wallet_repository: CreditWalletRepository,
+        credit_ledger_entry_repository: CreditLedgerEntryRepository,
+    ):
+        self.credit_wallet_repository = credit_wallet_repository
+        self.credit_ledger_entry_repository = credit_ledger_entry_repository
+
+    def execute(
+        self,
+        *,
+        wallet_id: UUID,
+        units: int,
+        reason: str,
+        reference: str | None = None,
+    ) -> CreditLedgerEntry:
+        if wallet_id is None or not isinstance(wallet_id, UUID):
+            raise ValueError("Wallet id is required and must be a UUID instance.")
+
+        wallet = self.credit_wallet_repository.get_by_id(wallet_id)
+        if wallet is None:
+            raise ValueError("CreditWallet does not exist.")
+        if not wallet.is_active:
+            raise ValueError("CreditWallet is inactive.")
+
+        if units is None or isinstance(units, bool) or not isinstance(units, int) or units <= 0:
+            raise ValueError("Units must be a positive integer.")
+
+        # Entity __post_init__ will handle trimming and validating string contents for reason/reference
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=wallet_id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=units,
+            reason=reason,
+            reference=reference,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self.credit_ledger_entry_repository.save(entry)
+
+
+class RecordDebit:
+    def __init__(
+        self,
+        credit_wallet_repository: CreditWalletRepository,
+        credit_ledger_entry_repository: CreditLedgerEntryRepository,
+    ):
+        self.credit_wallet_repository = credit_wallet_repository
+        self.credit_ledger_entry_repository = credit_ledger_entry_repository
+
+    def execute(
+        self,
+        *,
+        wallet_id: UUID,
+        units: int,
+        reason: str,
+        reference: str | None = None,
+    ) -> CreditLedgerEntry:
+        if wallet_id is None or not isinstance(wallet_id, UUID):
+            raise ValueError("Wallet id is required and must be a UUID instance.")
+
+        wallet = self.credit_wallet_repository.get_by_id(wallet_id)
+        if wallet is None:
+            raise ValueError("CreditWallet does not exist.")
+        if not wallet.is_active:
+            raise ValueError("CreditWallet is inactive.")
+
+        if units is None or isinstance(units, bool) or not isinstance(units, int) or units <= 0:
+            raise ValueError("Units must be a positive integer.")
+
+        # Retrieve entries and compute derived balance
+        entries = self.credit_ledger_entry_repository.list_by_wallet(wallet_id)
+        balance = 0
+        for e in entries:
+            if e.direction is CreditLedgerDirection.CREDIT:
+                balance += e.units
+            elif e.direction is CreditLedgerDirection.DEBIT:
+                balance -= e.units
+
+        if units > balance:
+            raise ValueError("Insufficient balance to execute debit.")
+
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=wallet_id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=units,
+            reason=reason,
+            reference=reference,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self.credit_ledger_entry_repository.save(entry)

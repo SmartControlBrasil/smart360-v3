@@ -331,3 +331,33 @@ class CreditWalletModel(models.Model):
 
     class Meta:
         db_table = "marketplace_credit_wallets"
+
+
+class CreditLedgerEntryModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    wallet = models.ForeignKey(
+        CreditWalletModel,
+        on_delete=models.PROTECT,
+        related_name="ledger_entries",
+    )
+    direction = models.CharField(max_length=20)
+    units = models.BigIntegerField()
+    reason = models.CharField(max_length=255)
+    reference = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_credit_ledger_entries"
+        indexes = [
+            models.Index(fields=["wallet", "created_at"], name="mkt_wallet_created_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(units__gt=0),
+                name="mkt_credit_ledger_units_gt_zero",
+            )
+        ]

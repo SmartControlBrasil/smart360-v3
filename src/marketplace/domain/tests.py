@@ -24,6 +24,8 @@ from src.marketplace.domain.entities import (
     SettlementMethod,
     EconomicSettlement,
     CreditWallet,
+    CreditLedgerDirection,
+    CreditLedgerEntry,
 )
 
 
@@ -1412,3 +1414,208 @@ class CreditWalletTests(SimpleTestCase):
         self.assertFalse(hasattr(wallet, "balance"))
         self.assertFalse(hasattr(wallet, "current_balance"))
         self.assertFalse(hasattr(wallet, "available_balance"))
+
+
+class CreditLedgerEntryTests(SimpleTestCase):
+    def test_valid_credit(self):
+        now = datetime.now(timezone.utc)
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.CREDIT,
+            units=100,
+            reason="Campaign Bonus",
+            reference="promo-123",
+            created_at=now,
+        )
+        self.assertEqual(entry.direction, CreditLedgerDirection.CREDIT)
+        self.assertEqual(entry.units, 100)
+        self.assertEqual(entry.reason, "Campaign Bonus")
+        self.assertEqual(entry.reference, "promo-123")
+
+    def test_valid_debit(self):
+        now = datetime.now(timezone.utc)
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.DEBIT,
+            units=30,
+            reason="Opportunity Access Charge",
+            reference=None,
+            created_at=now,
+        )
+        self.assertEqual(entry.direction, CreditLedgerDirection.DEBIT)
+        self.assertEqual(entry.units, 30)
+        self.assertEqual(entry.reason, "Opportunity Access Charge")
+        self.assertIsNone(entry.reference)
+
+    def test_invalid_id(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=None,
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=10,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_invalid_wallet_id(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id="invalid-uuid",
+                direction=CreditLedgerDirection.CREDIT,
+                units=10,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_invalid_direction(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction="invalid-direction",
+                units=10,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_units_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=0,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_units_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=-5,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_units_float_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=10.5,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_units_bool_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=True,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_reason_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=10,
+                reason="",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_reason_whitespace_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=10,
+                reason="   ",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_reason_normalized(self):
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.CREDIT,
+            units=10,
+            reason="  Normalized Reason  ",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(entry.reason, "Normalized Reason")
+
+    def test_reference_normalized(self):
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.CREDIT,
+            units=10,
+            reason="Reason",
+            reference="  Normalized Ref  ",
+            created_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(entry.reference, "Normalized Ref")
+
+    def test_empty_reference_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=10,
+                reason="Reason",
+                reference="   ",
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_naive_created_at_rejected(self):
+        with self.assertRaises(ValueError):
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=uuid4(),
+                direction=CreditLedgerDirection.CREDIT,
+                units=10,
+                reason="Reason",
+                reference=None,
+                created_at=datetime.now(),
+            )
+
+    def test_immutable_after_creation(self):
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.CREDIT,
+            units=10,
+            reason="Reason",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(FrozenInstanceError):
+            entry.units = 20
+        with self.assertRaises(FrozenInstanceError):
+            entry.reason = "Changed"

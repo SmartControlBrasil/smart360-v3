@@ -21,6 +21,8 @@ from src.marketplace.domain.entities import (
     EconomicSettlement,
     Money,
     CreditWallet,
+    CreditLedgerDirection,
+    CreditLedgerEntry,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -34,10 +36,12 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceCategoryModel,
     ServiceRequestModel,
     CreditWalletModel,
+    CreditLedgerEntryModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoEconomicSettlementRepository,
     DjangoCreditWalletRepository,
+    DjangoCreditLedgerEntryRepository,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityAccessRepository,
@@ -2176,3 +2180,220 @@ class DjangoCreditWalletRepositoryTests(TestCase):
         self.wallet_repository.save(wallet)
         with self.assertRaises(ProtectedError):
             self.org_model.delete()
+
+
+class DjangoCreditLedgerEntryRepositoryTests(TestCase):
+    def setUp(self):
+        self.wallet_repository = DjangoCreditWalletRepository()
+        self.ledger_repository = DjangoCreditLedgerEntryRepository()
+
+        self.org_id = uuid4()
+        self.org_model = OrganizationModel.objects.create(
+            id=self.org_id,
+            name="Org Ledger Test",
+            slug="org-ledger-test",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        now = datetime.now(timezone.utc)
+        self.wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repository.save(self.wallet)
+
+    def test_save_and_get_by_id_credit(self):
+        now = datetime.now(timezone.utc)
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=100,
+            reason="Campaign",
+            reference="ref-1",
+            created_at=now,
+        )
+        saved = self.ledger_repository.save(entry)
+        self.assertEqual(saved.id, entry.id)
+
+        retrieved = self.ledger_repository.get_by_id(entry.id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.id, entry.id)
+        self.assertEqual(retrieved.wallet_id, self.wallet.id)
+        self.assertEqual(retrieved.direction, CreditLedgerDirection.CREDIT)
+        self.assertEqual(retrieved.units, 100)
+        self.assertEqual(retrieved.reason, "Campaign")
+        self.assertEqual(retrieved.reference, "ref-1")
+        self.assertEqual(retrieved.created_at, now)
+
+    def test_save_and_get_by_id_debit(self):
+        now = datetime.now(timezone.utc)
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=50,
+            reason="Spend",
+            reference=None,
+            created_at=now,
+        )
+        saved = self.ledger_repository.save(entry)
+        self.assertEqual(saved.id, entry.id)
+
+        retrieved = self.ledger_repository.get_by_id(entry.id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.direction, CreditLedgerDirection.DEBIT)
+        self.assertEqual(retrieved.units, 50)
+        self.assertIsNone(retrieved.reference)
+
+    def test_missing_get_returns_none(self):
+        self.assertIsNone(self.ledger_repository.get_by_id(uuid4()))
+
+    def test_list_by_wallet_ordering_and_isolation(self):
+        # Create second wallet
+        org2_id = uuid4()
+        OrganizationModel.objects.create(
+            id=org2_id,
+            name="Org Ledger Test 2",
+            slug="org-ledger-test-2",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        wallet2 = CreditWallet(
+            id=uuid4(),
+            organization_id=org2_id,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.wallet_repository.save(wallet2)
+
+        t1 = datetime(2026, 8, 8, 10, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 8, 8, 10, 5, 0, tzinfo=timezone.utc)
+        t3 = datetime(2026, 8, 8, 10, 10, 0, tzinfo=timezone.utc)
+
+        # entry 1 (wallet 1)
+        e1 = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=100,
+            reason="Deposit 1",
+            reference=None,
+            created_at=t1,
+        )
+        # entry 2 (wallet 2 - isolated)
+        e2_isolated = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=wallet2.id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=200,
+            reason="Isolated Deposit",
+            reference=None,
+            created_at=t2,
+        )
+        # entry 3 (wallet 1)
+        e3 = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=30,
+            reason="Spend 1",
+            reference=None,
+            created_at=t3,
+        )
+
+        self.ledger_repository.save(e1)
+        self.ledger_repository.save(e2_isolated)
+        self.ledger_repository.save(e3)
+
+        # Retrieve wallet 1 list
+        list1 = self.ledger_repository.list_by_wallet(self.wallet.id)
+        self.assertEqual(len(list1), 2)
+        self.assertEqual(list1[0].id, e1.id)
+        self.assertEqual(list1[1].id, e3.id)
+
+        # Retrieve wallet 2 list
+        list2 = self.ledger_repository.list_by_wallet(wallet2.id)
+        self.assertEqual(len(list2), 1)
+        self.assertEqual(list2[0].id, e2_isolated.id)
+
+    def test_protect_prevents_wallet_deletion_with_ledger_entries(self):
+        entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=10,
+            reason="Reason",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.ledger_repository.save(entry)
+        with self.assertRaises(ProtectedError):
+            CreditWalletModel.objects.get(id=self.wallet.id).delete()
+
+    def test_units_db_constraint_gt_zero(self):
+        from django.db import transaction
+        # We manually write to ORM to bypass domain validation and verify database check constraint
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                CreditLedgerEntryModel.objects.create(
+                    id=uuid4(),
+                    wallet_id=self.wallet.id,
+                    direction=CreditLedgerDirection.CREDIT.value,
+                    units=0,
+                    reason="Invalid zero",
+                    created_at=datetime.now(timezone.utc),
+                )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                CreditLedgerEntryModel.objects.create(
+                    id=uuid4(),
+                    wallet_id=self.wallet.id,
+                    direction=CreditLedgerDirection.CREDIT.value,
+                    units=-10,
+                    reason="Invalid negative",
+                    created_at=datetime.now(timezone.utc),
+                )
+
+    def test_duplicate_id_cannot_overwrite_immutable_entry(self):
+        from django.db import transaction
+        entry_id = uuid4()
+        entry1 = CreditLedgerEntry(
+            id=entry_id,
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=100,
+            reason="Original Entry",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.ledger_repository.save(entry1)
+
+        # Attempt to save duplicate entry with changed values
+        entry2 = CreditLedgerEntry(
+            id=entry_id,
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=200,
+            reason="Malicious overwrite",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.ledger_repository.save(entry2)
+
+        # Retrieve and verify original remains unchanged
+        retrieved = self.ledger_repository.get_by_id(entry_id)
+        self.assertEqual(retrieved.direction, CreditLedgerDirection.CREDIT)
+        self.assertEqual(retrieved.units, 100)
+        self.assertEqual(retrieved.reason, "Original Entry")

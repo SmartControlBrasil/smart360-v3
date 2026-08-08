@@ -20,6 +20,9 @@ from src.marketplace.application.use_cases import (
     QuoteOpportunityAccessPrice,
     RecordEconomicSettlement,
     CreateCreditWallet,
+    GetCreditWalletBalance,
+    RecordCredit,
+    RecordDebit,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
@@ -42,6 +45,8 @@ from src.marketplace.domain.entities import (
     SettlementMethod,
     EconomicSettlement,
     CreditWallet,
+    CreditLedgerDirection,
+    CreditLedgerEntry,
 )
 from src.organizations.domain.entities import Organization
 
@@ -965,6 +970,31 @@ class InMemoryCreditWalletRepository:
             if item.organization_id == organization_id:
                 return item
         return None
+
+
+class InMemoryCreditLedgerEntryRepository:
+    def __init__(self):
+        self._items: dict[str, CreditLedgerEntry] = {}
+        self.save_calls = 0
+        self.last_saved: CreditLedgerEntry | None = None
+
+    def save(self, entry: CreditLedgerEntry) -> CreditLedgerEntry:
+        # Immutable save check
+        if str(entry.id) in self._items:
+            raise Exception("IntegrityError: Duplicate primary key.")
+        self.save_calls += 1
+        self.last_saved = entry
+        self._items[str(entry.id)] = entry
+        return entry
+
+    def get_by_id(self, entry_id: UUID) -> CreditLedgerEntry | None:
+        return self._items.get(str(entry_id))
+
+    def list_by_wallet(self, wallet_id: UUID) -> list[CreditLedgerEntry]:
+        # Return deterministic chronological order (created_at ASC, id ASC)
+        results = [e for e in self._items.values() if e.wallet_id == wallet_id]
+        results.sort(key=lambda x: (x.created_at, x.id))
+        return results
 
 
 class CreateProviderServiceTests(SimpleTestCase):
@@ -5249,3 +5279,392 @@ class CreateCreditWalletTests(SimpleTestCase):
         self.assertNotEqual(wallet_a.organization_id, wallet_b.organization_id)
         self.assertEqual(wallet_repo.get_by_organization(org_id_a).id, wallet_a.id)
         self.assertEqual(wallet_repo.get_by_organization(org_id_b).id, wallet_b.id)
+
+
+class RecordCreditTests(SimpleTestCase):
+    def setUp(self):
+        self.wallet_repo = InMemoryCreditWalletRepository()
+        self.ledger_repo = InMemoryCreditLedgerEntryRepository()
+        self.wallet_id = uuid4()
+        now = datetime.now(timezone.utc)
+        self.wallet = CreditWallet(
+            id=self.wallet_id,
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repo.save(self.wallet)
+
+    def test_invalid_wallet_id_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=None, units=10, reason="Reason")
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id="invalid-uuid", units=10, reason="Reason")
+
+    def test_missing_wallet_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=uuid4(), units=10, reason="Reason")
+
+    def test_inactive_wallet_rejected(self):
+        self.wallet.deactivate(datetime.now(timezone.utc))
+        self.wallet_repo.save(self.wallet)
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="Reason")
+
+    def test_zero_units_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=0, reason="Reason")
+
+    def test_negative_units_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=-5, reason="Reason")
+
+    def test_float_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10.5, reason="Reason")
+
+    def test_bool_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=True, reason="Reason")
+
+    def test_invalid_reason_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="   ")
+
+    def test_invalid_reference_rejected(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="Reason", reference="   ")
+
+    def test_valid_credit_recorded(self):
+        use_case = RecordCredit(self.wallet_repo, self.ledger_repo)
+        entry = use_case.execute(
+            wallet_id=self.wallet_id,
+            units=150,
+            reason="Campaign Promotion",
+            reference="campaign-55",
+        )
+
+        self.assertIsNotNone(entry.id)
+        self.assertEqual(entry.wallet_id, self.wallet_id)
+        self.assertEqual(entry.direction, CreditLedgerDirection.CREDIT)
+        self.assertEqual(entry.units, 150)
+        self.assertEqual(entry.reason, "Campaign Promotion")
+        self.assertEqual(entry.reference, "campaign-55")
+        self.assertIsNotNone(entry.created_at.tzinfo)
+        self.assertEqual(self.ledger_repo.save_calls, 1)
+
+        # Assert wallet remains unchanged
+        self.assertFalse(hasattr(self.wallet, "balance"))
+
+
+class GetCreditWalletBalanceTests(SimpleTestCase):
+    def setUp(self):
+        self.wallet_repo = InMemoryCreditWalletRepository()
+        self.ledger_repo = InMemoryCreditLedgerEntryRepository()
+        self.wallet_id = uuid4()
+        now = datetime.now(timezone.utc)
+        self.wallet = CreditWallet(
+            id=self.wallet_id,
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repo.save(self.wallet)
+
+    def test_empty_ledger_returns_0(self):
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        self.assertEqual(use_case.execute(wallet_id=self.wallet_id), 0)
+
+    def test_one_credit_returns_units(self):
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Credit",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        self.assertEqual(use_case.execute(wallet_id=self.wallet_id), 100)
+
+    def test_multiple_credits_accumulate(self):
+        now = datetime.now(timezone.utc)
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Credit 1",
+                reference=None,
+                created_at=now,
+            )
+        )
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=50,
+                reason="Credit 2",
+                reference=None,
+                created_at=now,
+            )
+        )
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        self.assertEqual(use_case.execute(wallet_id=self.wallet_id), 150)
+
+    def test_mixed_credits_and_debits(self):
+        now = datetime.now(timezone.utc)
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Credit",
+                reference=None,
+                created_at=now,
+            )
+        )
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.DEBIT,
+                units=30,
+                reason="Debit",
+                reference=None,
+                created_at=now,
+            )
+        )
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        self.assertEqual(use_case.execute(wallet_id=self.wallet_id), 70)
+
+    def test_wallet_missing_rejected(self):
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=uuid4())
+
+    def test_invalid_uuid_rejected(self):
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id="invalid-uuid")
+
+    def test_does_not_mutate_wallet_and_creates_no_entries(self):
+        use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        use_case.execute(wallet_id=self.wallet_id)
+        self.assertFalse(hasattr(self.wallet, "balance"))
+        self.assertEqual(self.ledger_repo.save_calls, 0)
+
+
+class RecordDebitTests(SimpleTestCase):
+    def setUp(self):
+        self.wallet_repo = InMemoryCreditWalletRepository()
+        self.ledger_repo = InMemoryCreditLedgerEntryRepository()
+        self.wallet_id = uuid4()
+        now = datetime.now(timezone.utc)
+        self.wallet = CreditWallet(
+            id=self.wallet_id,
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repo.save(self.wallet)
+
+    def test_missing_wallet_rejected(self):
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=uuid4(), units=10, reason="Reason")
+
+    def test_inactive_wallet_rejected(self):
+        self.wallet.deactivate(datetime.now(timezone.utc))
+        self.wallet_repo.save(self.wallet)
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="Reason")
+
+    def test_no_balance_rejects_debit(self):
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="Reason")
+
+    def test_insufficient_balance_rejects(self):
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=50,
+                reason="Credit",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=51, reason="Reason")
+
+    def test_exact_available_balance_allowed(self):
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=50,
+                reason="Credit",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        entry = use_case.execute(wallet_id=self.wallet_id, units=50, reason="Spend exact")
+        self.assertEqual(entry.direction, CreditLedgerDirection.DEBIT)
+        self.assertEqual(entry.units, 50)
+
+    def test_partial_debit_allowed(self):
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet_id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=50,
+                reason="Credit",
+                reference=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        entry = use_case.execute(wallet_id=self.wallet_id, units=20, reason="Spend partial")
+        self.assertEqual(entry.direction, CreditLedgerDirection.DEBIT)
+        self.assertEqual(entry.units, 20)
+
+    def test_invalid_units_rejected(self):
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=0, reason="Reason")
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=-10, reason="Reason")
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=5.5, reason="Reason")
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=True, reason="Reason")
+
+    def test_invalid_reason_rejected(self):
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="   ")
+
+    def test_wallet_has_no_balance_mutation(self):
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        self.assertFalse(hasattr(self.wallet, "balance"))
+
+    def test_failed_debit_creates_no_entry(self):
+        use_case = RecordDebit(self.wallet_repo, self.ledger_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(wallet_id=self.wallet_id, units=10, reason="Fail debit")
+        self.assertEqual(self.ledger_repo.save_calls, 0)
+
+
+class CreditLedgerAccountingFlowTests(SimpleTestCase):
+    def test_critical_accounting_flow(self):
+        wallet_repo = InMemoryCreditWalletRepository()
+        ledger_repo = InMemoryCreditLedgerEntryRepository()
+        wallet_id = uuid4()
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=wallet_id,
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        wallet_repo.save(wallet)
+
+        credit_use_case = RecordCredit(wallet_repo, ledger_repo)
+        debit_use_case = RecordDebit(wallet_repo, ledger_repo)
+        balance_use_case = GetCreditWalletBalance(wallet_repo, ledger_repo)
+
+        # CREDIT 100
+        credit_use_case.execute(wallet_id=wallet_id, units=100, reason="Deposit 1")
+        # CREDIT 50
+        credit_use_case.execute(wallet_id=wallet_id, units=50, reason="Deposit 2")
+        # DEBIT 30
+        debit_use_case.execute(wallet_id=wallet_id, units=30, reason="Spend 1")
+
+        # Assert 3 immutable entries
+        self.assertEqual(ledger_repo.save_calls, 3)
+        self.assertEqual(len(ledger_repo.list_by_wallet(wallet_id)), 3)
+
+        # Assert no balance field
+        self.assertFalse(hasattr(wallet, "balance"))
+
+        # Assert derived balance is 120
+        self.assertEqual(balance_use_case.execute(wallet_id=wallet_id), 120)
+
+    def test_critical_overspend_fails(self):
+        wallet_repo = InMemoryCreditWalletRepository()
+        ledger_repo = InMemoryCreditLedgerEntryRepository()
+        wallet_id = uuid4()
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=wallet_id,
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        wallet_repo.save(wallet)
+
+        credit_use_case = RecordCredit(wallet_repo, ledger_repo)
+        debit_use_case = RecordDebit(wallet_repo, ledger_repo)
+        balance_use_case = GetCreditWalletBalance(wallet_repo, ledger_repo)
+
+        # CREDIT 100
+        credit_use_case.execute(wallet_id=wallet_id, units=100, reason="Initial Credit")
+
+        # DEBIT 101 Attempt
+        with self.assertRaises(ValueError):
+            debit_use_case.execute(wallet_id=wallet_id, units=101, reason="Overspend")
+
+        # Ledger still has only 1 entry
+        self.assertEqual(ledger_repo.save_calls, 1)
+        self.assertEqual(balance_use_case.execute(wallet_id=wallet_id), 100)
+
+    def test_exact_spend_returns_zero(self):
+        wallet_repo = InMemoryCreditWalletRepository()
+        ledger_repo = InMemoryCreditLedgerEntryRepository()
+        wallet_id = uuid4()
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=wallet_id,
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        wallet_repo.save(wallet)
+
+        credit_use_case = RecordCredit(wallet_repo, ledger_repo)
+        debit_use_case = RecordDebit(wallet_repo, ledger_repo)
+        balance_use_case = GetCreditWalletBalance(wallet_repo, ledger_repo)
+
+        credit_use_case.execute(wallet_id=wallet_id, units=100, reason="Credit")
+        debit_use_case.execute(wallet_id=wallet_id, units=100, reason="Exact spend")
+
+        self.assertEqual(balance_use_case.execute(wallet_id=wallet_id), 0)

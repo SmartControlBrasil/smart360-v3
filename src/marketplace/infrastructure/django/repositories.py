@@ -12,6 +12,7 @@ from src.marketplace.application.ports import (
     ServiceRepository,
     EconomicSettlementRepository,
     CreditWalletRepository,
+    CreditLedgerEntryRepository,
 )
 from src.marketplace.domain.entities import (
     Opportunity,
@@ -29,6 +30,8 @@ from src.marketplace.domain.entities import (
     EconomicSettlement,
     Money,
     CreditWallet,
+    CreditLedgerDirection,
+    CreditLedgerEntry,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -42,6 +45,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceRequestModel,
     EconomicSettlementModel,
     CreditWalletModel,
+    CreditLedgerEntryModel,
 )
 
 
@@ -658,3 +662,41 @@ class DjangoCreditWalletRepository(CreditWalletRepository):
         except CreditWalletModel.DoesNotExist:
             return None
         return self._to_entity(model)
+
+
+class DjangoCreditLedgerEntryRepository(CreditLedgerEntryRepository):
+    @staticmethod
+    def _to_entity(model: CreditLedgerEntryModel) -> CreditLedgerEntry:
+        return CreditLedgerEntry(
+            id=model.id,
+            wallet_id=model.wallet_id,
+            direction=CreditLedgerDirection(model.direction),
+            units=model.units,
+            reason=model.reason,
+            reference=model.reference,
+            created_at=model.created_at,
+        )
+
+    def save(self, entry: CreditLedgerEntry) -> CreditLedgerEntry:
+        # Immutable save semantics: Must use create(), not update_or_create()
+        model = CreditLedgerEntryModel.objects.create(
+            id=entry.id,
+            wallet_id=entry.wallet_id,
+            direction=entry.direction.value,
+            units=entry.units,
+            reason=entry.reason,
+            reference=entry.reference,
+            created_at=entry.created_at,
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, entry_id: UUID) -> CreditLedgerEntry | None:
+        try:
+            model = CreditLedgerEntryModel.objects.get(id=entry_id)
+        except CreditLedgerEntryModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def list_by_wallet(self, wallet_id: UUID) -> list[CreditLedgerEntry]:
+        models = CreditLedgerEntryModel.objects.filter(wallet_id=wallet_id).order_by("created_at", "id")
+        return [self._to_entity(m) for m in models]
