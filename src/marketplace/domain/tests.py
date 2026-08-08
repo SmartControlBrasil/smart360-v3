@@ -26,6 +26,7 @@ from src.marketplace.domain.entities import (
     CreditWallet,
     CreditLedgerDirection,
     CreditLedgerEntry,
+    CreditSettlementResult,
 )
 
 
@@ -1619,3 +1620,148 @@ class CreditLedgerEntryTests(SimpleTestCase):
             entry.units = 20
         with self.assertRaises(FrozenInstanceError):
             entry.reason = "Changed"
+
+
+class CreditSettlementResultTests(SimpleTestCase):
+    def setUp(self):
+        self.quote = OpportunityPricingQuote(
+            amount=Money(2500, "BRL"),
+            reason="Standard Price",
+        )
+        self.settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    def test_valid_positive_credit_result(self):
+        res = CreditSettlementResult(
+            pricing_quote=self.quote,
+            credit_units=25,
+            debit_entry=self.debit,
+            settlement=self.settlement,
+        )
+        self.assertEqual(res.credit_units, 25)
+        self.assertEqual(res.debit_entry.units, 25)
+        self.assertEqual(res.settlement.method, SettlementMethod.CREDIT)
+
+    def test_valid_zero_credit_result(self):
+        settlement_zero = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.CREDIT,
+            amount=Money(0, "BRL"),
+            created_at=datetime.now(timezone.utc),
+        )
+        res = CreditSettlementResult(
+            pricing_quote=self.quote,
+            credit_units=0,
+            debit_entry=None,
+            settlement=settlement_zero,
+        )
+        self.assertEqual(res.credit_units, 0)
+        self.assertIsNone(res.debit_entry)
+        self.assertEqual(res.settlement.amount.amount_minor, 0)
+
+    def test_invalid_credit_units_negative(self):
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=-5,
+                debit_entry=self.debit,
+                settlement=self.settlement,
+            )
+
+    def test_invalid_credit_units_float(self):
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=25.5,
+                debit_entry=self.debit,
+                settlement=self.settlement,
+            )
+
+    def test_invalid_credit_units_bool(self):
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=True,
+                debit_entry=self.debit,
+                settlement=self.settlement,
+            )
+
+    def test_positive_units_require_debit_entry(self):
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=25,
+                debit_entry=None,
+                settlement=self.settlement,
+            )
+
+    def test_zero_units_reject_debit_entry(self):
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=0,
+                debit_entry=self.debit,
+                settlement=self.settlement,
+            )
+
+    def test_debit_must_be_debit_direction(self):
+        credit_entry = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=uuid4(),
+            direction=CreditLedgerDirection.CREDIT,
+            units=25,
+            reason="Credit",
+            reference=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=25,
+                debit_entry=credit_entry,
+                settlement=self.settlement,
+            )
+
+    def test_settlement_must_use_credit_method(self):
+        manual_settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.MANUAL,
+            amount=Money(2500, "BRL"),
+            created_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            CreditSettlementResult(
+                pricing_quote=self.quote,
+                credit_units=25,
+                debit_entry=self.debit,
+                settlement=manual_settlement,
+            )
+
+    def test_immutable_result(self):
+        res = CreditSettlementResult(
+            pricing_quote=self.quote,
+            credit_units=25,
+            debit_entry=self.debit,
+            settlement=self.settlement,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            res.credit_units = 30
+
+    def test_credit_method_value_is_exactly_credit(self):
+        self.assertEqual(SettlementMethod.CREDIT.value, "credit")

@@ -17,6 +17,7 @@ from src.marketplace.domain.entities import (
     EconomicSettlement,
     CreditWallet,
     CreditLedgerEntry,
+    Money,
 )
 
 
@@ -331,4 +332,29 @@ class CreditLedgerEntryRepository(Protocol):
         self,
         wallet_id: UUID,
     ) -> list[CreditLedgerEntry]:
+        ...
+
+
+class CreditCostPolicy(Protocol):
+    def units_required(
+        self,
+        *,
+        price: Money,
+        interest: OpportunityInterest,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> int:
+        ...
+
+
+class CreditSettlementAtomicWriter(Protocol):
+    def persist(
+        self,
+        *,
+        debit_entry: CreditLedgerEntry | None,
+        settlement: EconomicSettlement,
+        wallet_id: UUID,
+        required_units: int,
+    ) -> None:
         ...

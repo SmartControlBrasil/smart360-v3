@@ -418,6 +418,7 @@ class OpportunityPricingQuote:
 class SettlementMethod(StrEnum):
     MANUAL = "manual"
     COMPLIMENTARY = "complimentary"
+    CREDIT = "credit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,3 +537,35 @@ class CreditLedgerEntry:
             raise ValueError("CreditLedgerEntry created_at must be a datetime instance.")
         if self.created_at.tzinfo is None:
             raise ValueError("CreditLedgerEntry created_at must be timezone-aware.")
+
+
+@dataclass(frozen=True, slots=True)
+class CreditSettlementResult:
+    pricing_quote: OpportunityPricingQuote
+    credit_units: int
+    debit_entry: CreditLedgerEntry | None
+    settlement: EconomicSettlement
+
+    def __post_init__(self) -> None:
+        if self.pricing_quote is None or not isinstance(self.pricing_quote, OpportunityPricingQuote):
+            raise ValueError("pricing_quote must be an OpportunityPricingQuote instance.")
+        if self.credit_units is None or isinstance(self.credit_units, bool) or not isinstance(self.credit_units, int):
+            raise ValueError("credit_units must be an integer.")
+        if self.credit_units < 0:
+            raise ValueError("credit_units cannot be negative.")
+
+        if self.credit_units == 0 and self.debit_entry is not None:
+            raise ValueError("debit_entry must be None when credit_units is 0.")
+        if self.credit_units > 0 and self.debit_entry is None:
+            raise ValueError("debit_entry must be provided when credit_units > 0.")
+
+        if self.debit_entry is not None:
+            if not isinstance(self.debit_entry, CreditLedgerEntry):
+                raise ValueError("debit_entry must be a CreditLedgerEntry instance.")
+            if self.debit_entry.direction is not CreditLedgerDirection.DEBIT:
+                raise ValueError("debit_entry direction must be DEBIT.")
+
+        if self.settlement is None or not isinstance(self.settlement, EconomicSettlement):
+            raise ValueError("settlement must be an EconomicSettlement instance.")
+        if self.settlement.method is not SettlementMethod.CREDIT:
+            raise ValueError("settlement method must be CREDIT.")

@@ -13,6 +13,7 @@ from src.marketplace.application.ports import (
     EconomicSettlementRepository,
     CreditWalletRepository,
     CreditLedgerEntryRepository,
+    CreditSettlementAtomicWriter,
 )
 from src.marketplace.domain.entities import (
     Opportunity,
@@ -700,3 +701,55 @@ class DjangoCreditLedgerEntryRepository(CreditLedgerEntryRepository):
     def list_by_wallet(self, wallet_id: UUID) -> list[CreditLedgerEntry]:
         models = CreditLedgerEntryModel.objects.filter(wallet_id=wallet_id).order_by("created_at", "id")
         return [self._to_entity(m) for m in models]
+
+
+class DjangoCreditSettlementAtomicWriter(CreditSettlementAtomicWriter):
+    def persist(
+        self,
+        *,
+        debit_entry: CreditLedgerEntry | None,
+        settlement: EconomicSettlement,
+        wallet_id: UUID,
+        required_units: int,
+    ) -> None:
+        from django.db import transaction
+
+        with transaction.atomic():
+            # 1. select_for_update CreditWallet row to enforce concurrency safety
+            wallet_model = CreditWalletModel.objects.select_for_update().get(id=wallet_id)
+            if not wallet_model.is_active:
+                raise ValueError("Wallet is inactive inside transactional verification.")
+
+            # 2. Authoritative balance check from DB rows under lock
+            if required_units > 0:
+                entries = CreditLedgerEntryModel.objects.filter(wallet_id=wallet_id)
+                balance = 0
+                for entry_model in entries:
+                    if entry_model.direction == "credit":
+                        balance += entry_model.units
+                    elif entry_model.direction == "debit":
+                        balance -= entry_model.units
+
+                if required_units > balance:
+                    raise ValueError("Insufficient wallet credit balance under row lock.")
+
+                # 3. Create debit entry
+                CreditLedgerEntryModel.objects.create(
+                    id=debit_entry.id,
+                    wallet_id=debit_entry.wallet_id,
+                    direction=debit_entry.direction.value,
+                    units=debit_entry.units,
+                    reason=debit_entry.reason,
+                    reference=debit_entry.reference,
+                    created_at=debit_entry.created_at,
+                )
+
+            # 4. Create EconomicSettlement
+            EconomicSettlementModel.objects.create(
+                id=settlement.id,
+                interest_id=settlement.interest_id,
+                method=settlement.method.value,
+                amount_minor=settlement.amount.amount_minor,
+                currency=settlement.amount.currency,
+                created_at=settlement.created_at,
+            )

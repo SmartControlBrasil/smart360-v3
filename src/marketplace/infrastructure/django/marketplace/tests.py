@@ -42,6 +42,7 @@ from src.marketplace.infrastructure.django.repositories import (
     DjangoEconomicSettlementRepository,
     DjangoCreditWalletRepository,
     DjangoCreditLedgerEntryRepository,
+    DjangoCreditSettlementAtomicWriter,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityAccessRepository,
@@ -2397,3 +2398,206 @@ class DjangoCreditLedgerEntryRepositoryTests(TestCase):
         self.assertEqual(retrieved.direction, CreditLedgerDirection.CREDIT)
         self.assertEqual(retrieved.units, 100)
         self.assertEqual(retrieved.reason, "Original Entry")
+
+
+class DjangoCreditSettlementAtomicWriterTests(TestCase):
+    def setUp(self):
+        self.wallet_repository = DjangoCreditWalletRepository()
+        self.ledger_repository = DjangoCreditLedgerEntryRepository()
+        self.writer = DjangoCreditSettlementAtomicWriter()
+
+        self.org_id = uuid4()
+        self.org_model = OrganizationModel.objects.create(
+            id=self.org_id,
+            name="Org Atomic Test",
+            slug="org-atomic-test",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        now = datetime.now(timezone.utc)
+        self.wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repository.save(self.wallet)
+
+        # Load initial credits to avoid balance checks failure
+        self.ledger_repository.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet.id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Load",
+                reference=None,
+                created_at=now,
+            )
+        )
+
+        # Create model dependencies for EconomicSettlement
+        self.cat_model = ServiceCategoryModel.objects.create(
+            id=uuid4(), name="Cat", slug="cat", is_active=True, created_at=now, updated_at=now
+        )
+        self.service_model = ServiceModel.objects.create(
+            id=uuid4(), category=self.cat_model, name="Service", slug="service", is_active=True, created_at=now, updated_at=now
+        )
+        self.request_model = ServiceRequestModel.objects.create(
+            id=uuid4(), organization=self.org_model, service=self.service_model, title="Title", description="desc", status="open", created_at=now, updated_at=now
+        )
+        self.opportunity_model = OpportunityModel.objects.create(
+            id=uuid4(), service_request=self.request_model, status="open", max_accesses=3, created_at=now, updated_at=now
+        )
+        self.provider_model = ProviderModel.objects.create(
+            id=uuid4(), organization=self.org_model, display_name="Prov", slug="prov", description="desc", is_active=True, created_at=now, updated_at=now
+        )
+        self.invitation_model = OpportunityInvitationModel.objects.create(
+            id=uuid4(), opportunity=self.opportunity_model, provider=self.provider_model, created_at=now
+        )
+        self.interest_model = OpportunityInterestModel.objects.create(
+            id=uuid4(), invitation=self.invitation_model, created_at=now
+        )
+
+    def test_positive_debit_and_settlement_persisted(self):
+        now = datetime.now(timezone.utc)
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=None,
+            created_at=now,
+        )
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=now,
+        )
+
+        self.writer.persist(
+            debit_entry=debit,
+            settlement=settlement,
+            wallet_id=self.wallet.id,
+            required_units=25,
+        )
+
+        # Verify both persisted
+        self.assertIsNotNone(self.ledger_repository.get_by_id(debit.id))
+        model_settlement = EconomicSettlementModel.objects.get(id=settlement.id)
+        self.assertEqual(model_settlement.method, "credit")
+        self.assertEqual(model_settlement.amount_minor, 2500)
+
+    def test_zero_debit_settlement_only_persisted(self):
+        now = datetime.now(timezone.utc)
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(0, "BRL"),
+            created_at=now,
+        )
+
+        self.writer.persist(
+            debit_entry=None,
+            settlement=settlement,
+            wallet_id=self.wallet.id,
+            required_units=0,
+        )
+
+        # Verify settlement persisted and ledger is unchanged (only 1 CREDIT entry)
+        self.assertEqual(EconomicSettlementModel.objects.filter(id=settlement.id).count(), 1)
+        self.assertEqual(CreditLedgerEntryModel.objects.filter(wallet_id=self.wallet.id).count(), 1)
+
+    def test_duplicate_settlement_rolls_transaction_back(self):
+        now = datetime.now(timezone.utc)
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=None,
+            created_at=now,
+        )
+        settlement_id = uuid4()
+        settlement1 = EconomicSettlement(
+            id=settlement_id,
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=now,
+        )
+        # Duplicate interest_id or PK to trigger conflict
+        settlement2 = EconomicSettlement(
+            id=settlement_id,
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=now,
+        )
+
+        self.writer.persist(debit_entry=debit, settlement=settlement1, wallet_id=self.wallet.id, required_units=25)
+
+        # Attempt to save duplicate, must raise IntegrityError and rollback debit2
+        debit2 = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=10,
+            reason="Debit 2",
+            reference=None,
+            created_at=now,
+        )
+        with self.assertRaises(IntegrityError):
+            self.writer.persist(debit_entry=debit2, settlement=settlement2, wallet_id=self.wallet.id, required_units=10)
+
+        # Verify debit2 was NOT saved due to transaction rollback
+        self.assertIsNone(self.ledger_repository.get_by_id(debit2.id))
+
+    def test_insufficient_persisted_balance_rejects_before_debit(self):
+        now = datetime.now(timezone.utc)
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=101, # Wallet only has 100
+            reason="Overspend",
+            reference=None,
+            created_at=now,
+        )
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(10100, "BRL"),
+            created_at=now,
+        )
+
+        with self.assertRaises(ValueError):
+            self.writer.persist(debit_entry=debit, settlement=settlement, wallet_id=self.wallet.id, required_units=101)
+
+        self.assertIsNone(self.ledger_repository.get_by_id(debit.id))
+        self.assertEqual(EconomicSettlementModel.objects.filter(id=settlement.id).count(), 0)
+
+    def test_inactive_wallet_rejected_under_authoritative_transaction(self):
+        self.wallet.deactivate(datetime.now(timezone.utc))
+        self.wallet_repository.save(self.wallet)
+
+        now = datetime.now(timezone.utc)
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(0, "BRL"),
+            created_at=now,
+        )
+
+        with self.assertRaises(ValueError):
+            self.writer.persist(debit_entry=None, settlement=settlement, wallet_id=self.wallet.id, required_units=0)

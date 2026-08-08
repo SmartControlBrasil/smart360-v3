@@ -17,6 +17,8 @@ from src.marketplace.application.ports import (
     EconomicSettlementRepository,
     CreditWalletRepository,
     CreditLedgerEntryRepository,
+    CreditCostPolicy,
+    CreditSettlementAtomicWriter,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -40,6 +42,7 @@ from src.marketplace.domain.entities import (
     CreditWallet,
     CreditLedgerDirection,
     CreditLedgerEntry,
+    CreditSettlementResult,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -1095,3 +1098,138 @@ class RecordDebit:
             created_at=datetime.now(timezone.utc),
         )
         return self.credit_ledger_entry_repository.save(entry)
+
+
+class SettleOpportunityWithCredits:
+    def __init__(
+        self,
+        *,
+        opportunity_interest_repository: OpportunityInterestRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
+        opportunity_repository: OpportunityRepository,
+        provider_repository: ProviderRepository,
+        opportunity_access_repository: OpportunityAccessRepository,
+        economic_settlement_repository: EconomicSettlementRepository,
+        credit_wallet_repository: CreditWalletRepository,
+        credit_ledger_entry_repository: CreditLedgerEntryRepository,
+        opportunity_pricing_policy: OpportunityPricingPolicy,
+        credit_cost_policy: CreditCostPolicy,
+        atomic_writer: CreditSettlementAtomicWriter,
+    ):
+        self.opportunity_interest_repository = opportunity_interest_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
+        self.opportunity_repository = opportunity_repository
+        self.provider_repository = provider_repository
+        self.opportunity_access_repository = opportunity_access_repository
+        self.economic_settlement_repository = economic_settlement_repository
+        self.credit_wallet_repository = credit_wallet_repository
+        self.credit_ledger_entry_repository = credit_ledger_entry_repository
+        self.opportunity_pricing_policy = opportunity_pricing_policy
+        self.credit_cost_policy = credit_cost_policy
+        self.atomic_writer = atomic_writer
+
+    def execute(self, *, interest_id: UUID) -> CreditSettlementResult:
+        if interest_id is None or not isinstance(interest_id, UUID):
+            raise ValueError("Interest id is required and must be a UUID instance.")
+
+        interest = self.opportunity_interest_repository.get_by_id(interest_id)
+        if interest is None:
+            raise ValueError("OpportunityInterest does not exist.")
+
+        invitation = self.opportunity_invitation_repository.get_by_id(interest.invitation_id)
+        if invitation is None:
+            raise ValueError("OpportunityInvitation does not exist.")
+
+        opportunity = self.opportunity_repository.get_by_id(invitation.opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        provider = self.provider_repository.get_by_id(invitation.provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        existing_access = self.opportunity_access_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+        )
+        if existing_access is not None:
+            raise ValueError("OpportunityAccess already exists.")
+
+        existing_settlement = self.economic_settlement_repository.get_by_interest(interest.id)
+        if existing_settlement is not None:
+            raise ValueError("EconomicSettlement already exists.")
+
+        wallet = self.credit_wallet_repository.get_by_organization(provider.organization_id)
+        if wallet is None:
+            raise ValueError("Organization wallet does not exist.")
+        if not wallet.is_active:
+            raise ValueError("Organization wallet is inactive.")
+
+        # Pricing and Conversion Cost policies
+        quote = self.opportunity_pricing_policy.quote(
+            opportunity=opportunity,
+            provider=provider,
+            interest=interest,
+            invitation=invitation,
+        )
+        if quote is None or quote.amount is None:
+            raise ValueError("OpportunityPricingQuote is invalid.")
+
+        required_units = self.credit_cost_policy.units_required(
+            price=quote.amount,
+            interest=interest,
+            invitation=invitation,
+            opportunity=opportunity,
+            provider=provider,
+        )
+        if required_units is None or isinstance(required_units, bool) or not isinstance(required_units, int) or required_units < 0:
+            raise ValueError("CreditCostPolicy returned an invalid units value.")
+
+        # Balance check for positive costs
+        if required_units > 0:
+            entries = self.credit_ledger_entry_repository.list_by_wallet(wallet.id)
+            balance = sum(e.units for e in entries if e.direction is CreditLedgerDirection.CREDIT) - \
+                      sum(e.units for e in entries if e.direction is CreditLedgerDirection.DEBIT)
+            if required_units > balance:
+                raise ValueError("Insufficient wallet credit balance.")
+
+        # Prepare facts
+        now = datetime.now(timezone.utc)
+        debit_entry = None
+        if required_units > 0:
+            debit_entry = CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=wallet.id,
+                direction=CreditLedgerDirection.DEBIT,
+                units=required_units,
+                reason="Opportunity access economic settlement",
+                reference=f"opportunity-interest:{interest.id}",
+                created_at=now,
+            )
+
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=quote.amount,
+            created_at=now,
+        )
+
+        # Atomic persistence
+        self.atomic_writer.persist(
+            debit_entry=debit_entry,
+            settlement=settlement,
+            wallet_id=wallet.id,
+            required_units=required_units,
+        )
+
+        return CreditSettlementResult(
+            pricing_quote=quote,
+            credit_units=required_units,
+            debit_entry=debit_entry,
+            settlement=settlement,
+        )

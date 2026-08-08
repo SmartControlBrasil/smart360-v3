@@ -23,6 +23,7 @@ from src.marketplace.application.use_cases import (
     GetCreditWalletBalance,
     RecordCredit,
     RecordDebit,
+    SettleOpportunityWithCredits,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
@@ -47,6 +48,11 @@ from src.marketplace.domain.entities import (
     CreditWallet,
     CreditLedgerDirection,
     CreditLedgerEntry,
+    CreditSettlementResult,
+)
+from src.marketplace.application.ports import (
+    CreditCostPolicy,
+    CreditSettlementAtomicWriter,
 )
 from src.organizations.domain.entities import Organization
 
@@ -995,6 +1001,54 @@ class InMemoryCreditLedgerEntryRepository:
         results = [e for e in self._items.values() if e.wallet_id == wallet_id]
         results.sort(key=lambda x: (x.created_at, x.id))
         return results
+
+
+class InMemoryCreditSettlementAtomicWriter:
+    def __init__(self, ledger_repo: InMemoryCreditLedgerEntryRepository, settlement_repo: InMemoryEconomicSettlementRepository):
+        self.ledger_repo = ledger_repo
+        self.settlement_repo = settlement_repo
+        self.persist_calls = 0
+
+    def persist(
+        self,
+        *,
+        debit_entry: CreditLedgerEntry | None,
+        settlement: EconomicSettlement,
+        wallet_id: UUID,
+        required_units: int,
+    ) -> None:
+        self.persist_calls += 1
+        if debit_entry is not None:
+            self.ledger_repo.save(debit_entry)
+        self.settlement_repo.save(settlement)
+
+
+class ConfigurableCreditCostPolicy:
+    def __init__(self, rate_callback=None):
+        self.call_count = 0
+        self.last_price = None
+        self.last_interest = None
+        self.last_invitation = None
+        self.last_opportunity = None
+        self.last_provider = None
+        self.rate_callback = rate_callback or (lambda price: price.amount_minor // 100)
+
+    def units_required(
+        self,
+        *,
+        price: Money,
+        interest: OpportunityInterest,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> int:
+        self.call_count += 1
+        self.last_price = price
+        self.last_interest = interest
+        self.last_invitation = invitation
+        self.last_opportunity = opportunity
+        self.last_provider = provider
+        return self.rate_callback(price)
 
 
 class CreateProviderServiceTests(SimpleTestCase):
@@ -5668,3 +5722,219 @@ class CreditLedgerAccountingFlowTests(SimpleTestCase):
         debit_use_case.execute(wallet_id=wallet_id, units=100, reason="Exact spend")
 
         self.assertEqual(balance_use_case.execute(wallet_id=wallet_id), 0)
+
+
+class SettleOpportunityWithCreditsTests(SimpleTestCase):
+    def setUp(self):
+        self.interest_repo = InMemoryOpportunityInterestRepository()
+        self.invitation_repo = InMemoryOpportunityInvitationRepository()
+        self.opportunity_repo = InMemoryOpportunityRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.access_repo = InMemoryOpportunityAccessRepository()
+        self.settlement_repo = InMemoryEconomicSettlementRepository()
+        self.wallet_repo = InMemoryCreditWalletRepository()
+        self.ledger_repo = InMemoryCreditLedgerEntryRepository()
+        self.pricing_policy = FakeOpportunityPricingPolicy()
+        self.cost_policy = ConfigurableCreditCostPolicy()
+        self.atomic_writer = InMemoryCreditSettlementAtomicWriter(self.ledger_repo, self.settlement_repo)
+        self.org_repo = InMemoryOrganizationRepository()
+
+        # Build valid context
+        self.org_id = uuid4()
+        now = datetime.now(timezone.utc)
+        self.org = Organization(id=self.org_id, name="Org", slug="org", is_active=True, created_at=now, updated_at=now)
+        self.org_repo.save(self.org)
+
+        self.wallet = CreditWallet(id=uuid4(), organization_id=self.org_id, is_active=True, created_at=now, updated_at=now)
+        self.wallet_repo.save(self.wallet)
+
+        self.provider = Provider(id=uuid4(), organization_id=self.org_id, display_name="Prov", slug="prov", description="desc", is_active=True, created_at=now, updated_at=now)
+        self.provider_repo.save(self.provider)
+
+        self.opportunity = Opportunity(id=uuid4(), service_request_id=uuid4(), status=OpportunityStatus.OPEN, max_accesses=3, created_at=now, updated_at=now)
+        self.opportunity_repo.save(self.opportunity)
+
+        self.invitation = OpportunityInvitation(id=uuid4(), opportunity_id=self.opportunity.id, provider_id=self.provider.id, created_at=now)
+        self.invitation_repo.save(self.invitation)
+
+        self.interest = OpportunityInterest(id=uuid4(), invitation_id=self.invitation.id, created_at=now)
+        self.interest_repo.save(self.interest)
+
+        # Setup standard pricing
+        self.pricing_policy = FakeOpportunityPricingPolicy(amount_minor=2500, currency="BRL")
+
+        # Add credits
+        self.ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet.id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Load",
+                reference=None,
+                created_at=now,
+            )
+        )
+
+        self.use_case = SettleOpportunityWithCredits(
+            opportunity_interest_repository=self.interest_repo,
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_repository=self.opportunity_repo,
+            provider_repository=self.provider_repo,
+            opportunity_access_repository=self.access_repo,
+            economic_settlement_repository=self.settlement_repo,
+            credit_wallet_repository=self.wallet_repo,
+            credit_ledger_entry_repository=self.ledger_repo,
+            opportunity_pricing_policy=self.pricing_policy,
+            credit_cost_policy=self.cost_policy,
+            atomic_writer=self.atomic_writer,
+        )
+
+    def test_invalid_interest_id_rejected(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=None)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id="invalid-uuid")
+
+    def test_missing_interest_rejected(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=uuid4())
+
+    def test_missing_invitation_rejected(self):
+        bad_interest = OpportunityInterest(id=uuid4(), invitation_id=uuid4(), created_at=datetime.now(timezone.utc))
+        self.interest_repo.save(bad_interest)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=bad_interest.id)
+
+    def test_missing_opportunity_rejected(self):
+        bad_inv = OpportunityInvitation(id=uuid4(), opportunity_id=uuid4(), provider_id=self.provider.id, created_at=datetime.now(timezone.utc))
+        self.invitation_repo.save(bad_inv)
+        bad_interest = OpportunityInterest(id=uuid4(), invitation_id=bad_inv.id, created_at=datetime.now(timezone.utc))
+        self.interest_repo.save(bad_interest)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=bad_interest.id)
+
+    def test_closed_opportunity_rejected(self):
+        self.opportunity.close()
+        self.opportunity_repo.save(self.opportunity)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+    def test_cancelled_opportunity_rejected(self):
+        self.opportunity.cancel()
+        self.opportunity_repo.save(self.opportunity)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+    def test_missing_provider_rejected(self):
+        bad_inv = OpportunityInvitation(id=uuid4(), opportunity_id=self.opportunity.id, provider_id=uuid4(), created_at=datetime.now(timezone.utc))
+        self.invitation_repo.save(bad_inv)
+        bad_interest = OpportunityInterest(id=uuid4(), invitation_id=bad_inv.id, created_at=datetime.now(timezone.utc))
+        self.interest_repo.save(bad_interest)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=bad_interest.id)
+
+    def test_inactive_provider_rejected(self):
+        self.provider.deactivate()
+        self.provider_repo.save(self.provider)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+    def test_existing_opportunity_access_rejected(self):
+        self.access_repo.save(
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=self.opportunity.id,
+                provider_id=self.provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+    def test_existing_economic_settlement_rejected_before_pricing(self):
+        self.settlement_repo.save(
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=self.interest.id,
+                method=SettlementMethod.MANUAL,
+                amount=Money(2500, "BRL"),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+        self.assertEqual(self.pricing_policy.call_count, 0)
+
+    def test_missing_wallet_rejected(self):
+        self.wallet_repo._items.clear()
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+    def test_inactive_wallet_rejected(self):
+        self.wallet.deactivate(datetime.now(timezone.utc))
+        self.wallet_repo.save(self.wallet)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+    def test_insufficient_balance_rejected(self):
+        # Configure pricing cost to require 101 credits when wallet has only 100
+        self.cost_policy.rate_callback = lambda price: 101
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+        # Verify no debit or settlement was saved
+        self.assertEqual(len(self.ledger_repo.list_by_wallet(self.wallet.id)), 1)
+        self.assertEqual(self.atomic_writer.persist_calls, 0)
+
+    def test_exact_balance_succeeds(self):
+        self.cost_policy.rate_callback = lambda price: 100
+        res = self.use_case.execute(interest_id=self.interest.id)
+        self.assertEqual(res.credit_units, 100)
+        self.assertIsNotNone(res.debit_entry)
+        self.assertEqual(res.debit_entry.units, 100)
+        self.assertEqual(res.settlement.amount.amount_minor, 2500)
+
+    def test_partial_balance_succeeds(self):
+        res = self.use_case.execute(interest_id=self.interest.id)
+        self.assertEqual(res.credit_units, 25)
+        self.assertEqual(res.debit_entry.units, 25)
+        self.assertEqual(res.debit_entry.direction, CreditLedgerDirection.DEBIT)
+        self.assertEqual(res.debit_entry.reason, "Opportunity access economic settlement")
+        self.assertEqual(res.debit_entry.reference, f"opportunity-interest:{self.interest.id}")
+        self.assertEqual(res.settlement.method, SettlementMethod.CREDIT)
+        self.assertEqual(res.settlement.amount, Money(2500, "BRL"))
+
+        # Verify balance query is 75
+        balance_use_case = GetCreditWalletBalance(self.wallet_repo, self.ledger_repo)
+        self.assertEqual(balance_use_case.execute(wallet_id=self.wallet.id), 75)
+
+        # No access granted
+        self.assertEqual(len(self.access_repo._items), 0)
+
+    def test_zero_credit_settlement_creates_no_debit_but_creates_economic_settlement(self):
+        self.cost_policy.rate_callback = lambda price: 0
+        res = self.use_case.execute(interest_id=self.interest.id)
+        self.assertEqual(res.credit_units, 0)
+        self.assertIsNone(res.debit_entry)
+        self.assertEqual(res.settlement.method, SettlementMethod.CREDIT)
+
+        # Debit remains absent, but settlement is created
+        self.assertEqual(len(self.ledger_repo.list_by_wallet(self.wallet.id)), 1) # Only initial CREDIT remains
+        self.assertEqual(len(self.settlement_repo._items), 1)
+
+    def test_policies_called_exactly_once(self):
+        self.use_case.execute(interest_id=self.interest.id)
+        self.assertEqual(self.pricing_policy.call_count, 1)
+        self.assertEqual(self.cost_policy.call_count, 1)
+
+    def test_retry_after_existing_settlement_rejected_without_double_debit(self):
+        # First successful settlement
+        self.use_case.execute(interest_id=self.interest.id)
+        self.assertEqual(self.atomic_writer.persist_calls, 1)
+
+        # Attempt second time
+        with self.assertRaises(ValueError):
+            self.use_case.execute(interest_id=self.interest.id)
+
+        # Atomic writer was not called a second time
+        self.assertEqual(self.atomic_writer.persist_calls, 1)
