@@ -325,6 +325,52 @@ class CreateServiceRequest:
         return self.service_request_repository.save(service_request)
 
 
+class DiscoverCandidates:
+    def __init__(
+        self,
+        service_request_repository: ServiceRequestRepository,
+        provider_service_repository: ProviderServiceRepository,
+        provider_repository: ProviderRepository,
+    ):
+        self.service_request_repository = service_request_repository
+        self.provider_service_repository = provider_service_repository
+        self.provider_repository = provider_repository
+
+    def execute(
+        self,
+        *,
+        service_request_id: UUID,
+    ) -> list[Provider]:
+        if service_request_id is None:
+            raise ValueError("ServiceRequest id is required.")
+        if not isinstance(service_request_id, UUID):
+            raise ValueError("ServiceRequest id must be a valid UUID instance.")
+
+        service_request = self.service_request_repository.get_by_id(service_request_id)
+        if service_request is None:
+            raise ValueError("ServiceRequest does not exist.")
+        if service_request.status is not ServiceRequestStatus.OPEN:
+            raise ValueError("ServiceRequest must be OPEN for candidate discovery.")
+
+        provider_services = self.provider_service_repository.list_active_by_service(
+            service_request.service_id,
+        )
+
+        unique_providers: dict[UUID, Provider] = {}
+        for provider_service in provider_services:
+            provider = self.provider_repository.get_by_id(provider_service.provider_id)
+            if provider is None:
+                continue
+            if not provider.is_active:
+                continue
+            unique_providers[provider.id] = provider
+
+        return sorted(
+            unique_providers.values(),
+            key=lambda provider: (provider.display_name.casefold(), str(provider.id)),
+        )
+
+
 class CreateOpportunity:
     def __init__(
         self,

@@ -10,6 +10,7 @@ from src.marketplace.application.use_cases import (
     CreateService,
     CreateServiceCategory,
     CreateServiceRequest,
+    DiscoverCandidates,
     GrantOpportunityAccess,
 )
 from src.marketplace.domain.entities import (
@@ -1356,6 +1357,481 @@ class CreateServiceRequestTests(SimpleTestCase):
                 service_id=service.id,
                 title="   ",
             )
+
+
+class DiscoverCandidatesTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        service_id: UUID,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=service_id,
+            title="Demanda tecnica",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        display_name: str,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name=display_name,
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider_service(
+        *,
+        provider_id: UUID,
+        service_id: UUID,
+        is_active: bool = True,
+    ) -> ProviderService:
+        now = datetime.now(timezone.utc)
+        return ProviderService(
+            id=uuid4(),
+            provider_id=provider_id,
+            service_id=service_id,
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_discovery_valid_with_single_eligible_provider(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(
+            uuid4(),
+            service_id=service_id,
+        )
+        provider = self._provider(uuid4(), display_name="Provider A")
+        capability = self._provider_service(
+            provider_id=provider.id,
+            service_id=service_id,
+            is_active=True,
+        )
+
+        service_request_repository.save(request)
+        provider_repository.save(provider)
+        provider_service_repository.save(capability)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].id, provider.id)
+
+    def test_request_id_none_rejected_before_repositories(self):
+        class SpyServiceRequestRepository(InMemoryServiceRequestRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(
+                self,
+                service_request_id: UUID,
+            ) -> ServiceRequest | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(service_request_id)
+
+        class SpyProviderServiceRepository(InMemoryProviderServiceRepository):
+            def __init__(self):
+                super().__init__()
+                self.list_calls = 0
+
+            def list_active_by_service(
+                self,
+                service_id: UUID,
+            ) -> list[ProviderService]:
+                self.list_calls += 1
+                return super().list_active_by_service(service_id)
+
+        class SpyProviderRepository(InMemoryProviderRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, provider_id: UUID) -> Provider | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(provider_id)
+
+        service_request_repository = SpyServiceRequestRepository()
+        provider_service_repository = SpyProviderServiceRepository()
+        provider_repository = SpyProviderRepository()
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=None)
+
+        self.assertEqual(service_request_repository.get_by_id_calls, 0)
+        self.assertEqual(provider_service_repository.list_calls, 0)
+        self.assertEqual(provider_repository.get_by_id_calls, 0)
+
+    def test_request_id_non_uuid_rejected_before_repositories(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id="invalid-uuid")
+
+    def test_service_request_not_found_is_rejected(self):
+        use_case = DiscoverCandidates(
+            service_request_repository=InMemoryServiceRequestRepository(),
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=InMemoryProviderRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=uuid4())
+
+    def test_service_request_cancelled_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        request = self._service_request(
+            uuid4(),
+            service_id=uuid4(),
+            status=ServiceRequestStatus.CANCELLED,
+        )
+        service_request_repository.save(request)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=InMemoryProviderRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=request.id)
+
+    def test_service_request_closed_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        request = self._service_request(
+            uuid4(),
+            service_id=uuid4(),
+            status=ServiceRequestStatus.CLOSED,
+        )
+        service_request_repository.save(request)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=InMemoryProviderRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=request.id)
+
+    def test_returns_empty_when_no_active_provider_service(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        service_id = uuid4()
+        request = self._service_request(
+            uuid4(),
+            service_id=service_id,
+        )
+        service_request_repository.save(request)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=InMemoryProviderServiceRepository(),
+            provider_repository=InMemoryProviderRepository(),
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(candidates, [])
+
+    def test_active_capability_and_active_provider_are_included(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(
+            uuid4(),
+            service_id=service_id,
+        )
+        provider = self._provider(uuid4(), display_name="Provider Ativo")
+        provider_service = self._provider_service(
+            provider_id=provider.id,
+            service_id=service_id,
+        )
+        service_request_repository.save(request)
+        provider_repository.save(provider)
+        provider_service_repository.save(provider_service)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual([candidate.id for candidate in candidates], [provider.id])
+
+    def test_active_capability_with_inactive_provider_is_excluded(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(
+            uuid4(),
+            service_id=service_id,
+        )
+        inactive_provider = self._provider(
+            uuid4(),
+            display_name="Provider Inativo",
+            is_active=False,
+        )
+        provider_service = self._provider_service(
+            provider_id=inactive_provider.id,
+            service_id=service_id,
+        )
+        service_request_repository.save(request)
+        provider_repository.save(inactive_provider)
+        provider_service_repository.save(provider_service)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(candidates, [])
+
+    def test_missing_provider_is_ignored(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(
+            uuid4(),
+            service_id=service_id,
+        )
+        missing_provider_id = uuid4()
+        provider_service = self._provider_service(
+            provider_id=missing_provider_id,
+            service_id=service_id,
+        )
+        service_request_repository.save(request)
+        provider_service_repository.save(provider_service)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(candidates, [])
+
+    def test_multiple_active_providers_are_returned(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        provider_a = self._provider(uuid4(), display_name="Provider A")
+        provider_b = self._provider(uuid4(), display_name="Provider B")
+        capability_a = self._provider_service(
+            provider_id=provider_a.id,
+            service_id=service_id,
+        )
+        capability_b = self._provider_service(
+            provider_id=provider_b.id,
+            service_id=service_id,
+        )
+
+        service_request_repository.save(request)
+        provider_repository.save(provider_a)
+        provider_repository.save(provider_b)
+        provider_service_repository.save(capability_a)
+        provider_service_repository.save(capability_b)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual({candidate.id for candidate in candidates}, {provider_a.id, provider_b.id})
+
+    def test_capabilities_from_other_service_are_not_returned(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+
+        requested_service_id = uuid4()
+        other_service_id = uuid4()
+        request = self._service_request(
+            uuid4(),
+            service_id=requested_service_id,
+        )
+        provider_requested = self._provider(uuid4(), display_name="Provider Requested")
+        provider_other = self._provider(uuid4(), display_name="Provider Other")
+
+        provider_service_repository.save(
+            self._provider_service(
+                provider_id=provider_requested.id,
+                service_id=requested_service_id,
+            )
+        )
+        provider_service_repository.save(
+            self._provider_service(
+                provider_id=provider_other.id,
+                service_id=other_service_id,
+            )
+        )
+        service_request_repository.save(request)
+        provider_repository.save(provider_requested)
+        provider_repository.save(provider_other)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].id, provider_requested.id)
+
+    def test_defensive_deduplication_by_provider_id(self):
+        class DuplicatedProviderServiceRepository(InMemoryProviderServiceRepository):
+            def __init__(self, duplicated_provider_service: ProviderService):
+                super().__init__()
+                self._duplicated_provider_service = duplicated_provider_service
+
+            def list_active_by_service(
+                self,
+                service_id: UUID,
+            ) -> list[ProviderService]:
+                if self._duplicated_provider_service.service_id != service_id:
+                    return []
+                return [
+                    self._duplicated_provider_service,
+                    self._duplicated_provider_service,
+                ]
+
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_repository = InMemoryProviderRepository()
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        provider = self._provider(uuid4(), display_name="Duplicated Provider")
+        duplicated_capability = self._provider_service(
+            provider_id=provider.id,
+            service_id=service_id,
+        )
+        provider_service_repository = DuplicatedProviderServiceRepository(
+            duplicated_capability,
+        )
+
+        service_request_repository.save(request)
+        provider_repository.save(provider)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].id, provider.id)
+
+    def test_ordering_is_deterministic_by_display_name_and_id(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        alpha_high = self._provider(
+            UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            display_name="alpha",
+        )
+        alpha_low = self._provider(
+            UUID("00000000-0000-0000-0000-000000000001"),
+            display_name="Alpha",
+        )
+        bravo = self._provider(uuid4(), display_name="Bravo")
+
+        for provider in [alpha_high, alpha_low, bravo]:
+            provider_repository.save(provider)
+            provider_service_repository.save(
+                self._provider_service(
+                    provider_id=provider.id,
+                    service_id=service_id,
+                )
+            )
+
+        service_request_repository.save(request)
+
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        candidates = use_case.execute(service_request_id=request.id)
+
+        self.assertEqual(
+            [candidate.id for candidate in candidates],
+            [alpha_low.id, alpha_high.id, bravo.id],
+        )
+
+    def test_signature_uses_only_technical_eligibility_repositories(self):
+        dependency_names = DiscoverCandidates.__init__.__code__.co_varnames
+
+        self.assertIn("service_request_repository", dependency_names)
+        self.assertIn("provider_service_repository", dependency_names)
+        self.assertIn("provider_repository", dependency_names)
+        self.assertNotIn("opportunity_repository", dependency_names)
+        self.assertNotIn("opportunity_access_repository", dependency_names)
 
 
 class CreateOpportunityTests(SimpleTestCase):
