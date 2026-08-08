@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "src.identity.infrastructure.django.accounts.apps.AccountsConfig",
     "src.organizations.infrastructure.django.organizations.apps.OrganizationsConfig",
     "src.memberships.infrastructure.django.memberships.apps.MembershipsConfig",
+    "src.marketplace.infrastructure.django.marketplace.apps.MarketplaceConfig",
 ]
 
 MIDDLEWARE = [
