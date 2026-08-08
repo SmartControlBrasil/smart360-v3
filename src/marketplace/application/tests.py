@@ -940,6 +940,8 @@ class InMemoryEconomicSettlementRepository:
         self._items: dict[str, EconomicSettlement] = {}
         self.save_calls = 0
         self.last_saved: EconomicSettlement | None = None
+        self.get_by_interest_calls = 0
+        self.last_get_by_interest_id: UUID | None = None
 
     def save(self, settlement: EconomicSettlement) -> EconomicSettlement:
         self.save_calls += 1
@@ -951,6 +953,8 @@ class InMemoryEconomicSettlementRepository:
         return self._items.get(str(settlement_id))
 
     def get_by_interest(self, interest_id: UUID) -> EconomicSettlement | None:
+        self.get_by_interest_calls += 1
+        self.last_get_by_interest_id = interest_id
         for item in self._items.values():
             if item.interest_id == interest_id:
                 return item
@@ -6020,28 +6024,38 @@ class SettlementAwareAccessEntitlementPolicyTests(SimpleTestCase):
         self.assertEqual(decision.reason, "economic_settlement_exists")
 
     def test_settlement_repository_queried_once(self):
-        # We can verify it returns by verifying the policy works
-        # The simple repo works inline, so we verify exact execution.
+        self.assertEqual(self.settlement_repo.get_by_interest_calls, 0)
+
         decision = self.policy.decide(
             interest=self.interest,
             invitation=self.invitation,
             opportunity=self.opportunity,
             provider=self.provider,
         )
+
         self.assertFalse(decision.allowed)
+        self.assertEqual(self.settlement_repo.get_by_interest_calls, 1)
+        self.assertEqual(
+            self.settlement_repo.last_get_by_interest_id,
+            self.interest.id,
+        )
 
     def test_policy_creates_no_opportunity_access(self):
-        # Simple verification that no access is passed to policy or generated
+        # Policy only reads settlement evidence and returns a decision.
+        before_items = len(self.settlement_repo._items)
+        before_save_calls = self.settlement_repo.save_calls
         self.policy.decide(
             interest=self.interest,
             invitation=self.invitation,
             opportunity=self.opportunity,
             provider=self.provider,
         )
-        # policy has no repository referencing OpportunityAccess
+        self.assertEqual(len(self.settlement_repo._items), before_items)
+        self.assertEqual(self.settlement_repo.save_calls, before_save_calls)
 
     def test_policy_creates_no_settlement(self):
         self.assertEqual(len(self.settlement_repo._items), 0)
+        self.assertEqual(self.settlement_repo.save_calls, 0)
         self.policy.decide(
             interest=self.interest,
             invitation=self.invitation,
@@ -6049,16 +6063,96 @@ class SettlementAwareAccessEntitlementPolicyTests(SimpleTestCase):
             provider=self.provider,
         )
         self.assertEqual(len(self.settlement_repo._items), 0)
+        self.assertEqual(self.settlement_repo.save_calls, 0)
 
     def test_policy_does_not_mutate_supplied_entities(self):
+        original_interest = (
+            self.interest.id,
+            self.interest.invitation_id,
+            self.interest.created_at,
+        )
+        original_invitation = (
+            self.invitation.id,
+            self.invitation.opportunity_id,
+            self.invitation.provider_id,
+            self.invitation.created_at,
+        )
         original_status = self.opportunity.status
+        original_provider = (
+            self.provider.id,
+            self.provider.organization_id,
+            self.provider.display_name,
+            self.provider.slug,
+            self.provider.description,
+            self.provider.is_active,
+            self.provider.created_at,
+            self.provider.updated_at,
+        )
+
         self.policy.decide(
             interest=self.interest,
             invitation=self.invitation,
             opportunity=self.opportunity,
             provider=self.provider,
         )
+
+        self.assertEqual(
+            (
+                self.interest.id,
+                self.interest.invitation_id,
+                self.interest.created_at,
+            ),
+            original_interest,
+        )
+        self.assertEqual(
+            (
+                self.invitation.id,
+                self.invitation.opportunity_id,
+                self.invitation.provider_id,
+                self.invitation.created_at,
+            ),
+            original_invitation,
+        )
         self.assertEqual(self.opportunity.status, original_status)
+        self.assertEqual(
+            (
+                self.provider.id,
+                self.provider.organization_id,
+                self.provider.display_name,
+                self.provider.slug,
+                self.provider.description,
+                self.provider.is_active,
+                self.provider.created_at,
+                self.provider.updated_at,
+            ),
+            original_provider,
+        )
+
+    def test_settlement_for_other_interest_does_not_allow_current_interest(self):
+        other_interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=self.interest.invitation_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.settlement_repo.save(
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=other_interest.id,
+                method=SettlementMethod.CREDIT,
+                amount=Money(2500, "BRL"),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        decision = self.policy.decide(
+            interest=self.interest,
+            invitation=self.invitation,
+            opportunity=self.opportunity,
+            provider=self.provider,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "economic_settlement_required")
 
 
 class RequestOpportunityAccessIntegrationTests(SimpleTestCase):
@@ -6119,6 +6213,7 @@ class RequestOpportunityAccessIntegrationTests(SimpleTestCase):
         self.assertIsNotNone(res.access)
         self.assertEqual(res.access.opportunity_id, self.opportunity.id)
         self.assertEqual(res.access.provider_id, self.provider.id)
+        self.assertEqual(len(self.access_repo._items), 1)
 
     def test_valid_complimentary_settlement_allowed_and_access_created(self):
         self.settlement_repo.save(
@@ -6129,6 +6224,7 @@ class RequestOpportunityAccessIntegrationTests(SimpleTestCase):
         res = self.use_case.execute(interest_id=self.interest.id)
         self.assertTrue(res.decision.allowed)
         self.assertIsNotNone(res.access)
+        self.assertEqual(len(self.access_repo._items), 1)
 
     def test_valid_credit_settlement_allowed_and_access_created(self):
         self.settlement_repo.save(
@@ -6139,6 +6235,7 @@ class RequestOpportunityAccessIntegrationTests(SimpleTestCase):
         res = self.use_case.execute(interest_id=self.interest.id)
         self.assertTrue(res.decision.allowed)
         self.assertIsNotNone(res.access)
+        self.assertEqual(len(self.access_repo._items), 1)
 
     def test_settlement_belongs_to_current_interest_isolation(self):
         now = datetime.now(timezone.utc)
@@ -6207,3 +6304,58 @@ class RequestOpportunityAccessIntegrationTests(SimpleTestCase):
         )
         with self.assertRaises(ValueError):
             self.use_case.execute(interest_id=self.interest.id)
+
+    def test_critical_credit_flow_entitlement_then_access_without_new_economic_mutations(self):
+        now = datetime.now(timezone.utc)
+        self.settlement_repo.save(
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=self.interest.id,
+                method=SettlementMethod.CREDIT,
+                amount=Money(2500, "BRL"),
+                created_at=now,
+            )
+        )
+
+        wallet_repo = InMemoryCreditWalletRepository()
+        ledger_repo = InMemoryCreditLedgerEntryRepository()
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.provider.organization_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        wallet_repo.save(wallet)
+        ledger_repo.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=wallet.id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Seed credits",
+                reference="seed",
+                created_at=now,
+            )
+        )
+
+        pricing_policy = FakeOpportunityPricingPolicy(amount_minor=2500, currency="BRL")
+
+        settlement_count_before = len(self.settlement_repo._items)
+        settlement_save_calls_before = self.settlement_repo.save_calls
+        wallet_save_calls_before = wallet_repo.save_calls
+        ledger_save_calls_before = ledger_repo.save_calls
+
+        result = self.use_case.execute(interest_id=self.interest.id)
+
+        self.assertTrue(result.decision.allowed)
+        self.assertEqual(result.decision.reason, "economic_settlement_exists")
+        self.assertIsNotNone(result.access)
+        self.assertEqual(len(self.access_repo._items), 1)
+
+        # Access request should not execute pricing/credits/economic settlement writes.
+        self.assertEqual(pricing_policy.call_count, 0)
+        self.assertEqual(len(self.settlement_repo._items), settlement_count_before)
+        self.assertEqual(self.settlement_repo.save_calls, settlement_save_calls_before)
+        self.assertEqual(wallet_repo.save_calls, wallet_save_calls_before)
+        self.assertEqual(ledger_repo.save_calls, ledger_save_calls_before)
