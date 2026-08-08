@@ -19,6 +19,7 @@ from src.marketplace.application.use_cases import (
     RequestOpportunityAccess,
     QuoteOpportunityAccessPrice,
     RecordEconomicSettlement,
+    CreateCreditWallet,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
@@ -40,6 +41,7 @@ from src.marketplace.domain.entities import (
     OpportunityPricingQuote,
     SettlementMethod,
     EconomicSettlement,
+    CreditWallet,
 )
 from src.organizations.domain.entities import Organization
 
@@ -939,6 +941,28 @@ class InMemoryEconomicSettlementRepository:
     def get_by_interest(self, interest_id: UUID) -> EconomicSettlement | None:
         for item in self._items.values():
             if item.interest_id == interest_id:
+                return item
+        return None
+
+
+class InMemoryCreditWalletRepository:
+    def __init__(self):
+        self._items: dict[str, CreditWallet] = {}
+        self.save_calls = 0
+        self.last_saved: CreditWallet | None = None
+
+    def save(self, wallet: CreditWallet) -> CreditWallet:
+        self.save_calls += 1
+        self.last_saved = wallet
+        self._items[str(wallet.id)] = wallet
+        return wallet
+
+    def get_by_id(self, wallet_id: UUID) -> CreditWallet | None:
+        return self._items.get(str(wallet_id))
+
+    def get_by_organization(self, organization_id: UUID) -> CreditWallet | None:
+        for item in self._items.values():
+            if item.organization_id == organization_id:
                 return item
         return None
 
@@ -5117,3 +5141,111 @@ class RecordEconomicSettlementTests(SimpleTestCase):
         # Assert by itself: Settlement remains absent, Access remains absent.
         self.assertEqual(len(settle_repo._items), 0)
         self.assertEqual(len(access_repo._items), 0)
+
+
+class CreateCreditWalletTests(SimpleTestCase):
+    @staticmethod
+    def _active_organization(org_id: UUID, is_active: bool = True) -> Organization:
+        now = datetime.now(timezone.utc)
+        return Organization(
+            id=org_id,
+            name="Test Org",
+            slug="test-org",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_invalid_organization_id_rejected(self):
+        use_case = CreateCreditWallet(
+            organization_repository=InMemoryOrganizationRepository(),
+            credit_wallet_repository=InMemoryCreditWalletRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(organization_id=None)
+        with self.assertRaises(ValueError):
+            use_case.execute(organization_id="invalid-uuid")
+
+    def test_nonexistent_organization_rejected(self):
+        use_case = CreateCreditWallet(
+            organization_repository=InMemoryOrganizationRepository(),
+            credit_wallet_repository=InMemoryCreditWalletRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(organization_id=uuid4())
+
+    def test_inactive_organization_rejected(self):
+        org_repo = InMemoryOrganizationRepository()
+        wallet_repo = InMemoryCreditWalletRepository()
+        org_id = uuid4()
+        org = self._active_organization(org_id, is_active=False)
+        org_repo.save(org)
+
+        use_case = CreateCreditWallet(org_repo, wallet_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(organization_id=org_id)
+
+    def test_duplicate_wallet_rejected(self):
+        org_repo = InMemoryOrganizationRepository()
+        wallet_repo = InMemoryCreditWalletRepository()
+        org_id = uuid4()
+        org = self._active_organization(org_id)
+        org_repo.save(org)
+
+        now = datetime.now(timezone.utc)
+        wallet_repo.save(
+            CreditWallet(
+                id=uuid4(),
+                organization_id=org_id,
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        use_case = CreateCreditWallet(org_repo, wallet_repo)
+        with self.assertRaises(ValueError):
+            use_case.execute(organization_id=org_id)
+
+    def test_valid_wallet_created(self):
+        org_repo = InMemoryOrganizationRepository()
+        wallet_repo = InMemoryCreditWalletRepository()
+        org_id = uuid4()
+        org = self._active_organization(org_id)
+        org_repo.save(org)
+
+        use_case = CreateCreditWallet(org_repo, wallet_repo)
+        wallet = use_case.execute(organization_id=org_id)
+
+        self.assertIsNotNone(wallet.id)
+        self.assertEqual(wallet.organization_id, org_id)
+        self.assertTrue(wallet.is_active)
+        self.assertIsNotNone(wallet.created_at)
+        self.assertIsNotNone(wallet.created_at.tzinfo)
+        self.assertEqual(wallet.created_at, wallet.updated_at)
+        self.assertEqual(wallet_repo.save_calls, 1)
+
+        self.assertFalse(hasattr(wallet, "balance"))
+        self.assertFalse(hasattr(wallet, "current_balance"))
+        self.assertFalse(hasattr(wallet, "available_balance"))
+
+    def test_structural_wallet_isolation_multiple_tenants(self):
+        org_repo = InMemoryOrganizationRepository()
+        wallet_repo = InMemoryCreditWalletRepository()
+
+        org_id_a = uuid4()
+        org_a = self._active_organization(org_id_a)
+        org_repo.save(org_a)
+
+        org_id_b = uuid4()
+        org_b = self._active_organization(org_id_b)
+        org_repo.save(org_b)
+
+        use_case = CreateCreditWallet(org_repo, wallet_repo)
+        wallet_a = use_case.execute(organization_id=org_id_a)
+        wallet_b = use_case.execute(organization_id=org_id_b)
+
+        self.assertNotEqual(wallet_a.id, wallet_b.id)
+        self.assertNotEqual(wallet_a.organization_id, wallet_b.organization_id)
+        self.assertEqual(wallet_repo.get_by_organization(org_id_a).id, wallet_a.id)
+        self.assertEqual(wallet_repo.get_by_organization(org_id_b).id, wallet_b.id)

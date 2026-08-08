@@ -312,3 +312,22 @@ class EconomicSettlementModel(models.Model):
                 name="mkt_settlement_amount_gte_zero",
             )
         ]
+
+
+class CreditWalletModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    organization = models.OneToOneField(
+        OrganizationModel,
+        on_delete=models.PROTECT,
+        related_name="credit_wallet",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_credit_wallets"

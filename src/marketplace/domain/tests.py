@@ -23,6 +23,7 @@ from src.marketplace.domain.entities import (
     OpportunityPricingQuote,
     SettlementMethod,
     EconomicSettlement,
+    CreditWallet,
 )
 
 
@@ -1204,3 +1205,210 @@ class EconomicSettlementTests(SimpleTestCase):
                 amount=m,
                 created_at=datetime.now(timezone.utc),
             )
+
+
+class CreditWalletTests(SimpleTestCase):
+    def test_valid_wallet(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.assertTrue(wallet.is_active)
+        self.assertEqual(wallet.created_at, now)
+        self.assertEqual(wallet.updated_at, now)
+
+    def test_invalid_id_rejected(self):
+        now = datetime.now(timezone.utc)
+        with self.assertRaises(ValueError):
+            CreditWallet(
+                id=None,
+                organization_id=uuid4(),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+
+    def test_invalid_organization_id_rejected(self):
+        now = datetime.now(timezone.utc)
+        with self.assertRaises(ValueError):
+            CreditWallet(
+                id=uuid4(),
+                organization_id="invalid-uuid",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+
+    def test_non_bool_active_rejected(self):
+        now = datetime.now(timezone.utc)
+        with self.assertRaises(ValueError):
+            CreditWallet(
+                id=uuid4(),
+                organization_id=uuid4(),
+                is_active=1,
+                created_at=now,
+                updated_at=now,
+            )
+
+    def test_naive_created_at_rejected(self):
+        now = datetime.now(timezone.utc)
+        with self.assertRaises(ValueError):
+            CreditWallet(
+                id=uuid4(),
+                organization_id=uuid4(),
+                is_active=True,
+                created_at=datetime.now(),
+                updated_at=now,
+            )
+
+    def test_naive_updated_at_rejected(self):
+        now = datetime.now(timezone.utc)
+        with self.assertRaises(ValueError):
+            CreditWallet(
+                id=uuid4(),
+                organization_id=uuid4(),
+                is_active=True,
+                created_at=now,
+                updated_at=datetime.now(),
+            )
+
+    def test_updated_at_before_created_at_rejected(self):
+        now = datetime.now(timezone.utc)
+        earlier = datetime.fromtimestamp(now.timestamp() - 10, timezone.utc)
+        with self.assertRaises(ValueError):
+            CreditWallet(
+                id=uuid4(),
+                organization_id=uuid4(),
+                is_active=True,
+                created_at=now,
+                updated_at=earlier,
+            )
+
+    def test_activate_works(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+        later = datetime.fromtimestamp(now.timestamp() + 5, timezone.utc)
+        wallet.activate(later)
+        self.assertTrue(wallet.is_active)
+        self.assertEqual(wallet.updated_at, later)
+
+    def test_deactivate_works(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        later = datetime.fromtimestamp(now.timestamp() + 5, timezone.utc)
+        wallet.deactivate(later)
+        self.assertFalse(wallet.is_active)
+        self.assertEqual(wallet.updated_at, later)
+
+    def test_activate_with_naive_time_rejected(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+        with self.assertRaises(ValueError):
+            wallet.activate(datetime.now())
+
+    def test_deactivate_with_naive_time_rejected(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        with self.assertRaises(ValueError):
+            wallet.deactivate(datetime.now())
+
+    def test_activate_with_earlier_time_rejected(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=False,
+            created_at=now,
+            updated_at=now,
+        )
+        earlier = datetime.fromtimestamp(now.timestamp() - 5, timezone.utc)
+        with self.assertRaises(ValueError):
+            wallet.activate(earlier)
+
+    def test_deactivate_with_earlier_time_rejected(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        earlier = datetime.fromtimestamp(now.timestamp() - 5, timezone.utc)
+        with self.assertRaises(ValueError):
+            wallet.deactivate(earlier)
+
+    def test_monotonic_lifecycle_timestamp_enforcement(self):
+        now = datetime.now(timezone.utc)
+        created = datetime.fromtimestamp(now.timestamp() - 20, timezone.utc)
+        updated = datetime.fromtimestamp(now.timestamp() - 10, timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=created,
+            updated_at=updated,
+        )
+
+        # 1. activate rejects current_time earlier than updated_at
+        earlier = datetime.fromtimestamp(updated.timestamp() - 1, timezone.utc)
+        with self.assertRaises(ValueError):
+            wallet.activate(earlier)
+
+        # 2. deactivate rejects current_time earlier than updated_at
+        with self.assertRaises(ValueError):
+            wallet.deactivate(earlier)
+
+        # 3. activate with current_time equal to updated_at remains valid
+        wallet.activate(updated)
+        self.assertEqual(wallet.updated_at, updated)
+
+        # 4. deactivate with current_time equal to updated_at remains valid
+        wallet.deactivate(updated)
+        self.assertEqual(wallet.updated_at, updated)
+
+        # 5. lifecycle with later timestamp updates updated_at normally
+        later = datetime.fromtimestamp(updated.timestamp() + 5, timezone.utc)
+        wallet.activate(later)
+        self.assertEqual(wallet.updated_at, later)
+
+    def test_no_balance_attribute_exists(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.assertFalse(hasattr(wallet, "balance"))
+        self.assertFalse(hasattr(wallet, "current_balance"))
+        self.assertFalse(hasattr(wallet, "available_balance"))

@@ -11,6 +11,7 @@ from src.marketplace.application.ports import (
     ServiceCategoryRepository,
     ServiceRepository,
     EconomicSettlementRepository,
+    CreditWalletRepository,
 )
 from src.marketplace.domain.entities import (
     Opportunity,
@@ -27,6 +28,7 @@ from src.marketplace.domain.entities import (
     SettlementMethod,
     EconomicSettlement,
     Money,
+    CreditWallet,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -39,6 +41,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceCategoryModel,
     ServiceRequestModel,
     EconomicSettlementModel,
+    CreditWalletModel,
 )
 
 
@@ -615,5 +618,43 @@ class DjangoEconomicSettlementRepository(EconomicSettlementRepository):
         try:
             model = EconomicSettlementModel.objects.get(interest_id=interest_id)
         except EconomicSettlementModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+
+class DjangoCreditWalletRepository(CreditWalletRepository):
+    @staticmethod
+    def _to_entity(model: CreditWalletModel) -> CreditWallet:
+        return CreditWallet(
+            id=model.id,
+            organization_id=model.organization_id,
+            is_active=model.is_active,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    def save(self, wallet: CreditWallet) -> CreditWallet:
+        model, _ = CreditWalletModel.objects.update_or_create(
+            id=wallet.id,
+            defaults={
+                "organization_id": wallet.organization_id,
+                "is_active": wallet.is_active,
+                "created_at": wallet.created_at,
+                "updated_at": wallet.updated_at,
+            },
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, wallet_id: UUID) -> CreditWallet | None:
+        try:
+            model = CreditWalletModel.objects.get(id=wallet_id)
+        except CreditWalletModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def get_by_organization(self, organization_id: UUID) -> CreditWallet | None:
+        try:
+            model = CreditWalletModel.objects.get(organization_id=organization_id)
+        except CreditWalletModel.DoesNotExist:
             return None
         return self._to_entity(model)

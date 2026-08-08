@@ -15,6 +15,7 @@ from src.marketplace.application.ports import (
     AccessEntitlementPolicy,
     OpportunityPricingPolicy,
     EconomicSettlementRepository,
+    CreditWalletRepository,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -35,6 +36,7 @@ from src.marketplace.domain.entities import (
     Money,
     SettlementMethod,
     EconomicSettlement,
+    CreditWallet,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -930,3 +932,41 @@ class RecordEconomicSettlement:
             created_at=datetime.now(timezone.utc),
         )
         return self.economic_settlement_repository.save(settlement)
+
+
+class CreateCreditWallet:
+    def __init__(
+        self,
+        organization_repository: OrganizationRepository,
+        credit_wallet_repository: CreditWalletRepository,
+    ):
+        self.organization_repository = organization_repository
+        self.credit_wallet_repository = credit_wallet_repository
+
+    def execute(
+        self,
+        *,
+        organization_id: UUID,
+    ) -> CreditWallet:
+        if organization_id is None or not isinstance(organization_id, UUID):
+            raise ValueError("Organization id is required and must be a UUID instance.")
+
+        org = self.organization_repository.get_by_id(organization_id)
+        if org is None:
+            raise ValueError("Organization does not exist.")
+        if not org.is_active:
+            raise ValueError("Organization is inactive.")
+
+        existing = self.credit_wallet_repository.get_by_organization(organization_id)
+        if existing is not None:
+            raise ValueError("CreditWallet already exists for this Organization.")
+
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=organization_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.credit_wallet_repository.save(wallet)

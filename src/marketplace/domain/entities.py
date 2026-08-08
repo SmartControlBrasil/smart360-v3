@@ -444,3 +444,46 @@ class EconomicSettlement:
 
         if self.method is SettlementMethod.COMPLIMENTARY and self.amount.amount_minor != 0:
             raise ValueError("COMPLIMENTARY settlement method requires amount_minor to be 0.")
+
+
+@dataclass(slots=True)
+class CreditWallet:
+    id: UUID
+    organization_id: UUID
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.id is None or not isinstance(self.id, UUID):
+            raise ValueError("CreditWallet id must be a valid UUID instance.")
+        if self.organization_id is None or not isinstance(self.organization_id, UUID):
+            raise ValueError("CreditWallet organization_id must be a valid UUID instance.")
+        if self.is_active is None or not isinstance(self.is_active, bool):
+            raise ValueError("CreditWallet is_active must be a boolean.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("CreditWallet created_at must be a datetime instance.")
+        if self.created_at.tzinfo is None:
+            raise ValueError("CreditWallet created_at must be timezone-aware.")
+        if self.updated_at is None or not isinstance(self.updated_at, datetime):
+            raise ValueError("CreditWallet updated_at must be a datetime instance.")
+        if self.updated_at.tzinfo is None:
+            raise ValueError("CreditWallet updated_at must be timezone-aware.")
+        if self.updated_at < self.created_at:
+            raise ValueError("CreditWallet updated_at cannot be before created_at.")
+
+    def activate(self, current_time: datetime) -> None:
+        if current_time is None or not isinstance(current_time, datetime) or current_time.tzinfo is None:
+            raise ValueError("activate requires a timezone-aware datetime instance.")
+        if current_time < self.updated_at:
+            raise ValueError("current_time cannot be before updated_at.")
+        self.is_active = True
+        self.updated_at = current_time
+
+    def deactivate(self, current_time: datetime) -> None:
+        if current_time is None or not isinstance(current_time, datetime) or current_time.tzinfo is None:
+            raise ValueError("deactivate requires a timezone-aware datetime instance.")
+        if current_time < self.updated_at:
+            raise ValueError("current_time cannot be before updated_at.")
+        self.is_active = False
+        self.updated_at = current_time

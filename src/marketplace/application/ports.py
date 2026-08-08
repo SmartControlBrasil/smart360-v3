@@ -15,6 +15,7 @@ from src.marketplace.domain.entities import (
     AccessEntitlementDecision,
     OpportunityPricingQuote,
     EconomicSettlement,
+    CreditWallet,
 )
 
 
@@ -289,4 +290,24 @@ class EconomicSettlementRepository(Protocol):
         self,
         interest_id: UUID,
     ) -> EconomicSettlement | None:
+        ...
+
+
+class CreditWalletRepository(Protocol):
+    def save(
+        self,
+        wallet: CreditWallet,
+    ) -> CreditWallet:
+        ...
+
+    def get_by_id(
+        self,
+        wallet_id: UUID,
+    ) -> CreditWallet | None:
+        ...
+
+    def get_by_organization(
+        self,
+        organization_id: UUID,
+    ) -> CreditWallet | None:
         ...

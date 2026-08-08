@@ -20,6 +20,7 @@ from src.marketplace.domain.entities import (
     SettlementMethod,
     EconomicSettlement,
     Money,
+    CreditWallet,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -32,8 +33,12 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceModel,
     ServiceCategoryModel,
     ServiceRequestModel,
+    CreditWalletModel,
 )
-from src.marketplace.infrastructure.django.repositories import DjangoEconomicSettlementRepository
+from src.marketplace.infrastructure.django.repositories import (
+    DjangoEconomicSettlementRepository,
+    DjangoCreditWalletRepository,
+)
 from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityAccessRepository,
     DjangoOpportunityInvitationRepository,
@@ -2076,3 +2081,98 @@ class DjangoEconomicSettlementRepositoryTests(TestCase):
         self.settlement_repository.save(settlement)
         with self.assertRaises(ProtectedError):
             OpportunityInterestModel.objects.get(id=self.interest.id).delete()
+
+
+class DjangoCreditWalletRepositoryTests(TestCase):
+    def setUp(self):
+        self.wallet_repository = DjangoCreditWalletRepository()
+        self.org_id = uuid4()
+        self.org_model = OrganizationModel.objects.create(
+            id=self.org_id,
+            name="Org Wallet Test",
+            slug="org-wallet-test",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def test_save_and_retrieve_wallet(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        saved = self.wallet_repository.save(wallet)
+        self.assertEqual(saved.id, wallet.id)
+
+        retrieved = self.wallet_repository.get_by_id(wallet.id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.id, wallet.id)
+        self.assertEqual(retrieved.organization_id, self.org_id)
+        self.assertTrue(retrieved.is_active)
+        self.assertEqual(retrieved.created_at, now)
+        self.assertEqual(retrieved.updated_at, now)
+
+        by_org = self.wallet_repository.get_by_organization(self.org_id)
+        self.assertIsNotNone(by_org)
+        self.assertEqual(by_org.id, wallet.id)
+
+    def test_save_missing_returns_none(self):
+        self.assertIsNone(self.wallet_repository.get_by_id(uuid4()))
+        self.assertIsNone(self.wallet_repository.get_by_organization(uuid4()))
+
+    def test_one_to_one_organization_uniqueness(self):
+        now = datetime.now(timezone.utc)
+        wallet1 = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repository.save(wallet1)
+
+        wallet2 = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        with self.assertRaises(IntegrityError):
+            self.wallet_repository.save(wallet2)
+
+    def test_lifecycle_update_persists(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repository.save(wallet)
+
+        later = datetime.fromtimestamp(now.timestamp() + 5, timezone.utc)
+        wallet.deactivate(later)
+        self.wallet_repository.save(wallet)
+
+        retrieved = self.wallet_repository.get_by_id(wallet.id)
+        self.assertFalse(retrieved.is_active)
+        self.assertEqual(retrieved.updated_at, later)
+
+    def test_protect_organization_deletion(self):
+        now = datetime.now(timezone.utc)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repository.save(wallet)
+        with self.assertRaises(ProtectedError):
+            self.org_model.delete()
