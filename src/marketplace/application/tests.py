@@ -18,6 +18,7 @@ from src.marketplace.application.use_cases import (
     RegisterOpportunityInterest,
     RequestOpportunityAccess,
     QuoteOpportunityAccessPrice,
+    RecordEconomicSettlement,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
@@ -37,6 +38,8 @@ from src.marketplace.domain.entities import (
     ServiceRequestStatus,
     Money,
     OpportunityPricingQuote,
+    SettlementMethod,
+    EconomicSettlement,
 )
 from src.organizations.domain.entities import Organization
 
@@ -914,6 +917,28 @@ class InMemoryOpportunityInterestRepository:
     def get_by_invitation(self, invitation_id: UUID) -> OpportunityInterest | None:
         for item in self._items.values():
             if item.invitation_id == invitation_id:
+                return item
+        return None
+
+
+class InMemoryEconomicSettlementRepository:
+    def __init__(self):
+        self._items: dict[str, EconomicSettlement] = {}
+        self.save_calls = 0
+        self.last_saved: EconomicSettlement | None = None
+
+    def save(self, settlement: EconomicSettlement) -> EconomicSettlement:
+        self.save_calls += 1
+        self.last_saved = settlement
+        self._items[str(settlement.id)] = settlement
+        return settlement
+
+    def get_by_id(self, settlement_id: UUID) -> EconomicSettlement | None:
+        return self._items.get(str(settlement_id))
+
+    def get_by_interest(self, interest_id: UUID) -> EconomicSettlement | None:
+        for item in self._items.values():
+            if item.interest_id == interest_id:
                 return item
         return None
 
@@ -4605,3 +4630,490 @@ class QuoteOpportunityAccessPriceTests(SimpleTestCase):
         self.assertTrue(result_allowed.decision.allowed)
         self.assertIsNotNone(result_allowed.access)
         self.assertEqual(len(access_repo._items), 1)
+
+
+class RecordEconomicSettlementTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        service_id: UUID,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=service_id,
+            title="Demanda tecnica",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _opportunity(
+        opportunity_id: UUID,
+        *,
+        service_request_id: UUID,
+        status: OpportunityStatus = OpportunityStatus.OPEN,
+    ) -> Opportunity:
+        now = datetime.now(timezone.utc)
+        return Opportunity(
+            id=opportunity_id,
+            service_request_id=service_request_id,
+            status=status,
+            max_accesses=3,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider",
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_invalid_interest_id_rejected(self):
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            economic_settlement_repository=InMemoryEconomicSettlementRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=None, method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id="invalid-uuid", method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_invalid_method_rejected(self):
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            economic_settlement_repository=InMemoryEconomicSettlementRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=uuid4(), method=None, amount=Money(100, "BRL"))
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=uuid4(), method="invalid-method", amount=Money(100, "BRL"))
+
+    def test_invalid_amount_rejected(self):
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            economic_settlement_repository=InMemoryEconomicSettlementRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=uuid4(), method=SettlementMethod.MANUAL, amount=None)
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=uuid4(), method=SettlementMethod.MANUAL, amount=25.90)
+
+    def test_nonexistent_interest_rejected(self):
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=InMemoryOpportunityInterestRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            economic_settlement_repository=InMemoryEconomicSettlementRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=uuid4(), method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_closed_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CLOSED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id, method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_cancelled_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CANCELLED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id, method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_inactive_provider_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4(), is_active=False)
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id, method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_existing_opportunity_access_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        access_repo.save(
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id, method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_duplicate_settlement_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        settle_repo.save(
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=interest.id,
+                method=SettlementMethod.MANUAL,
+                amount=Money(100, "BRL"),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(interest_id=interest.id, method=SettlementMethod.MANUAL, amount=Money(100, "BRL"))
+
+    def test_critical_semantic_settlement_test(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        settlement = use_case.execute(
+            interest_id=interest.id,
+            method=SettlementMethod.MANUAL,
+            amount=Money(2500, "BRL"),
+        )
+
+        self.assertIsNotNone(settlement.id)
+        self.assertEqual(settlement.interest_id, interest.id)
+        self.assertEqual(settlement.method, SettlementMethod.MANUAL)
+        self.assertEqual(settlement.amount.amount_minor, 2500)
+        self.assertEqual(settlement.amount.currency, "BRL")
+        self.assertIsNotNone(settlement.created_at)
+        self.assertIsNotNone(settlement.created_at.tzinfo)
+        self.assertEqual(settle_repo.save_calls, 1)
+        self.assertEqual(len(access_repo._items), 0)
+
+    def test_complimentary_test(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        use_case = RecordEconomicSettlement(
+            opportunity_interest_repository=int_repo,
+            opportunity_invitation_repository=inv_repo,
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_access_repository=access_repo,
+            economic_settlement_repository=settle_repo,
+        )
+        settlement = use_case.execute(
+            interest_id=interest.id,
+            method=SettlementMethod.COMPLIMENTARY,
+            amount=Money(0, "BRL"),
+        )
+
+        self.assertEqual(settlement.amount.amount_minor, 0)
+        self.assertEqual(settlement.method, SettlementMethod.COMPLIMENTARY)
+        self.assertEqual(len(access_repo._items), 0)
+
+    def test_zero_quote_vs_settlement_regression(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        int_repo = InMemoryOpportunityInterestRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        settle_repo = InMemoryEconomicSettlementRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        inv_repo.save(invitation)
+
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        int_repo.save(interest)
+
+        # Conceptual pricing policy returns Money(0, "BRL")
+        # Assert by itself: Settlement remains absent, Access remains absent.
+        self.assertEqual(len(settle_repo._items), 0)
+        self.assertEqual(len(access_repo._items), 0)

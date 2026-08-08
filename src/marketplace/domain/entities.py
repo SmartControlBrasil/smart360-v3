@@ -413,3 +413,34 @@ class OpportunityPricingQuote:
             raise ValueError("OpportunityPricingQuote reason cannot be empty.")
 
         object.__setattr__(self, "reason", normalized_reason)
+
+
+class SettlementMethod(StrEnum):
+    MANUAL = "manual"
+    COMPLIMENTARY = "complimentary"
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicSettlement:
+    id: UUID
+    interest_id: UUID
+    method: SettlementMethod
+    amount: Money
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.id is None or not isinstance(self.id, UUID):
+            raise ValueError("EconomicSettlement id must be a UUID instance.")
+        if self.interest_id is None or not isinstance(self.interest_id, UUID):
+            raise ValueError("EconomicSettlement interest_id must be a UUID instance.")
+        if self.method is None or not isinstance(self.method, SettlementMethod):
+            raise ValueError("EconomicSettlement method must be a SettlementMethod instance.")
+        if self.amount is None or not isinstance(self.amount, Money):
+            raise ValueError("EconomicSettlement amount must be a Money instance.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("EconomicSettlement created_at must be a datetime instance.")
+        if self.created_at.tzinfo is None:
+            raise ValueError("EconomicSettlement created_at must be timezone-aware.")
+
+        if self.method is SettlementMethod.COMPLIMENTARY and self.amount.amount_minor != 0:
+            raise ValueError("COMPLIMENTARY settlement method requires amount_minor to be 0.")

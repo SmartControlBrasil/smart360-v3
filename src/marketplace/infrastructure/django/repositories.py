@@ -10,6 +10,7 @@ from src.marketplace.application.ports import (
     ServiceRequestRepository,
     ServiceCategoryRepository,
     ServiceRepository,
+    EconomicSettlementRepository,
 )
 from src.marketplace.domain.entities import (
     Opportunity,
@@ -23,6 +24,9 @@ from src.marketplace.domain.entities import (
     ServiceCategory,
     ServiceRequest,
     ServiceRequestStatus,
+    SettlementMethod,
+    EconomicSettlement,
+    Money,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -34,6 +38,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceModel,
     ServiceCategoryModel,
     ServiceRequestModel,
+    EconomicSettlementModel,
 )
 
 
@@ -566,5 +571,49 @@ class DjangoOpportunityInterestRepository(OpportunityInterestRepository):
         try:
             model = OpportunityInterestModel.objects.get(invitation_id=invitation_id)
         except OpportunityInterestModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+
+class DjangoEconomicSettlementRepository(EconomicSettlementRepository):
+    @staticmethod
+    def _to_entity(model: EconomicSettlementModel) -> EconomicSettlement:
+        return EconomicSettlement(
+            id=model.id,
+            interest_id=model.interest_id,
+            method=SettlementMethod(model.method),
+            amount=Money(
+                amount_minor=model.amount_minor,
+                currency=model.currency,
+            ),
+            created_at=model.created_at,
+        )
+
+    def save(self, settlement: EconomicSettlement) -> EconomicSettlement:
+        # Since it is an immutable fact, we can use update_or_create to match project conventions,
+        # or standard create. Existing repositories use update_or_create. Let's stick to update_or_create.
+        model, _ = EconomicSettlementModel.objects.update_or_create(
+            id=settlement.id,
+            defaults={
+                "interest_id": settlement.interest_id,
+                "method": settlement.method.value,
+                "amount_minor": settlement.amount.amount_minor,
+                "currency": settlement.amount.currency,
+                "created_at": settlement.created_at,
+            },
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, settlement_id: UUID) -> EconomicSettlement | None:
+        try:
+            model = EconomicSettlementModel.objects.get(id=settlement_id)
+        except EconomicSettlementModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def get_by_interest(self, interest_id: UUID) -> EconomicSettlement | None:
+        try:
+            model = EconomicSettlementModel.objects.get(interest_id=interest_id)
+        except EconomicSettlementModel.DoesNotExist:
             return None
         return self._to_entity(model)

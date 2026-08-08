@@ -21,6 +21,8 @@ from src.marketplace.domain.entities import (
     RequestOpportunityAccessResult,
     Money,
     OpportunityPricingQuote,
+    SettlementMethod,
+    EconomicSettlement,
 )
 
 
@@ -1079,3 +1081,126 @@ class OpportunityPricingQuoteTests(SimpleTestCase):
             quote.amount = m2
         with self.assertRaises(FrozenInstanceError):
             quote.reason = "modified"
+
+
+class EconomicSettlementTests(SimpleTestCase):
+    def test_valid_manual_settlement(self):
+        m = Money(amount_minor=2500, currency="BRL")
+        now = datetime.now(timezone.utc)
+        es = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.MANUAL,
+            amount=m,
+            created_at=now,
+        )
+        self.assertEqual(es.amount, m)
+        self.assertEqual(es.method, SettlementMethod.MANUAL)
+
+    def test_valid_complimentary_zero_settlement(self):
+        m = Money(amount_minor=0, currency="BRL")
+        now = datetime.now(timezone.utc)
+        es = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.COMPLIMENTARY,
+            amount=m,
+            created_at=now,
+        )
+        self.assertEqual(es.amount.amount_minor, 0)
+        self.assertEqual(es.method, SettlementMethod.COMPLIMENTARY)
+
+    def test_invalid_id_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=None,
+                interest_id=uuid4(),
+                method=SettlementMethod.MANUAL,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id="invalid-uuid",
+                interest_id=uuid4(),
+                method=SettlementMethod.MANUAL,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_invalid_interest_id_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=None,
+                method=SettlementMethod.MANUAL,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_invalid_method_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=None,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method="invalid-method",
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_invalid_amount_type_rejected(self):
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=SettlementMethod.MANUAL,
+                amount=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_naive_created_at_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=SettlementMethod.MANUAL,
+                amount=m,
+                created_at=datetime.now(),
+            )
+
+    def test_immutable_after_creation(self):
+        m1 = Money(amount_minor=100, currency="BRL")
+        m2 = Money(amount_minor=200, currency="BRL")
+        now = datetime.now(timezone.utc)
+        es = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.MANUAL,
+            amount=m1,
+            created_at=now,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            es.amount = m2
+
+    def test_complimentary_positive_amount_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=SettlementMethod.COMPLIMENTARY,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+            )

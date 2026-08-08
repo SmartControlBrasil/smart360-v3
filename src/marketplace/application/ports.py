@@ -14,6 +14,7 @@ from src.marketplace.domain.entities import (
     ServiceRequest,
     AccessEntitlementDecision,
     OpportunityPricingQuote,
+    EconomicSettlement,
 )
 
 
@@ -268,4 +269,24 @@ class OpportunityPricingPolicy(Protocol):
         opportunity: Opportunity,
         provider: Provider,
     ) -> OpportunityPricingQuote:
+        ...
+
+
+class EconomicSettlementRepository(Protocol):
+    def save(
+        self,
+        settlement: EconomicSettlement,
+    ) -> EconomicSettlement:
+        ...
+
+    def get_by_id(
+        self,
+        settlement_id: UUID,
+    ) -> EconomicSettlement | None:
+        ...
+
+    def get_by_interest(
+        self,
+        interest_id: UUID,
+    ) -> EconomicSettlement | None:
         ...

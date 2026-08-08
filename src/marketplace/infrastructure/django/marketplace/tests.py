@@ -17,18 +17,23 @@ from src.marketplace.domain.entities import (
     ServiceCategory,
     ServiceRequest,
     ServiceRequestStatus,
+    SettlementMethod,
+    EconomicSettlement,
+    Money,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
     OpportunityInvitationModel,
     OpportunityInterestModel,
     OpportunityModel,
+    EconomicSettlementModel,
     ProviderModel,
     ProviderServiceModel,
     ServiceModel,
     ServiceCategoryModel,
     ServiceRequestModel,
 )
+from src.marketplace.infrastructure.django.repositories import DjangoEconomicSettlementRepository
 from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityAccessRepository,
     DjangoOpportunityInvitationRepository,
@@ -1916,3 +1921,158 @@ class DjangoOpportunityInterestRepositoryTests(TestCase):
         self.interest_repository.save(interest)
         with self.assertRaises(ProtectedError):
             OpportunityInvitationModel.objects.get(id=self.invitation_model.id).delete()
+
+
+class DjangoEconomicSettlementRepositoryTests(TestCase):
+    def setUp(self):
+        self.category_repository = DjangoServiceCategoryRepository()
+        self.service_repository = DjangoServiceRepository()
+        self.provider_repository = DjangoProviderRepository()
+        self.service_request_repository = DjangoServiceRequestRepository()
+        self.opportunity_repository = DjangoOpportunityRepository()
+        self.invitation_repository = DjangoOpportunityInvitationRepository()
+        self.interest_repository = DjangoOpportunityInterestRepository()
+        self.settlement_repository = DjangoEconomicSettlementRepository()
+
+        # Build category
+        from src.marketplace.domain.entities import ServiceCategory, Service, ServiceRequest, Opportunity, OpportunityInvitation
+        self.cat = ServiceCategory(
+            id=uuid4(),
+            name="Categoria Teste",
+            slug="categoria-teste",
+            description="desc",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.category_repository.save(self.cat)
+
+        self.service = Service(
+            id=uuid4(),
+            category_id=self.cat.id,
+            name="Servico Teste",
+            slug="servico-teste",
+            description="desc",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.service_repository.save(self.service)
+
+        self.org_id = uuid4()
+        # Create organization model in database to satisfy provider FK constraint
+        OrganizationModel.objects.create(
+            id=self.org_id,
+            name="Org Teste",
+            slug="org-teste",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.provider = Provider(
+            id=uuid4(),
+            organization_id=self.org_id,
+            display_name="Provider Teste",
+            slug="provider-teste",
+            description="desc",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repository.save(self.provider)
+
+        self.request = ServiceRequest(
+            id=uuid4(),
+            organization_id=self.org_id,
+            service_id=self.service.id,
+            title="Request Teste",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.service_request_repository.save(self.request)
+
+        self.opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=self.request.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opportunity_repository.save(self.opportunity)
+
+        self.invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=self.opportunity.id,
+            provider_id=self.provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repository.save(self.invitation)
+
+        self.interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=self.invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.interest_repository.save(self.interest)
+
+    def test_save_and_retrieve_settlement(self):
+        m = Money(amount_minor=2500, currency="BRL")
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest.id,
+            method=SettlementMethod.MANUAL,
+            amount=m,
+            created_at=datetime.now(timezone.utc),
+        )
+        saved = self.settlement_repository.save(settlement)
+        self.assertEqual(saved.id, settlement.id)
+
+        retrieved = self.settlement_repository.get_by_id(settlement.id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.id, settlement.id)
+        self.assertEqual(retrieved.interest_id, self.interest.id)
+        self.assertEqual(retrieved.method, SettlementMethod.MANUAL)
+        self.assertEqual(retrieved.amount.amount_minor, 2500)
+        self.assertEqual(retrieved.amount.currency, "BRL")
+
+        by_interest = self.settlement_repository.get_by_interest(self.interest.id)
+        self.assertIsNotNone(by_interest)
+        self.assertEqual(by_interest.id, settlement.id)
+
+    def test_one_to_one_interest_constraint(self):
+        m1 = Money(amount_minor=2500, currency="BRL")
+        settlement1 = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest.id,
+            method=SettlementMethod.MANUAL,
+            amount=m1,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.settlement_repository.save(settlement1)
+
+        settlement2 = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest.id,
+            method=SettlementMethod.MANUAL,
+            amount=m1,
+            created_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(IntegrityError):
+            self.settlement_repository.save(settlement2)
+
+    def test_protect_prevents_interest_delete_when_linked(self):
+        m = Money(amount_minor=2500, currency="BRL")
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest.id,
+            method=SettlementMethod.MANUAL,
+            amount=m,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.settlement_repository.save(settlement)
+        with self.assertRaises(ProtectedError):
+            OpportunityInterestModel.objects.get(id=self.interest.id).delete()

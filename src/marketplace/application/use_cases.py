@@ -14,6 +14,7 @@ from src.marketplace.application.ports import (
     ServiceRepository,
     AccessEntitlementPolicy,
     OpportunityPricingPolicy,
+    EconomicSettlementRepository,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -31,6 +32,9 @@ from src.marketplace.domain.entities import (
     AccessEntitlementDecision,
     RequestOpportunityAccessResult,
     OpportunityPricingQuote,
+    Money,
+    SettlementMethod,
+    EconomicSettlement,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -852,3 +856,77 @@ class QuoteOpportunityAccessPrice:
             opportunity=opportunity,
             provider=provider,
         )
+
+
+class RecordEconomicSettlement:
+    def __init__(
+        self,
+        opportunity_interest_repository: OpportunityInterestRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
+        opportunity_repository: OpportunityRepository,
+        provider_repository: ProviderRepository,
+        opportunity_access_repository: OpportunityAccessRepository,
+        economic_settlement_repository: EconomicSettlementRepository,
+    ):
+        self.opportunity_interest_repository = opportunity_interest_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
+        self.opportunity_repository = opportunity_repository
+        self.provider_repository = provider_repository
+        self.opportunity_access_repository = opportunity_access_repository
+        self.economic_settlement_repository = economic_settlement_repository
+
+    def execute(
+        self,
+        *,
+        interest_id: UUID,
+        method: SettlementMethod,
+        amount: Money,
+    ) -> EconomicSettlement:
+        if interest_id is None or not isinstance(interest_id, UUID):
+            raise ValueError("Interest id is required and must be a UUID instance.")
+
+        if method is None or not isinstance(method, SettlementMethod):
+            raise ValueError("Method is required and must be a SettlementMethod instance.")
+
+        if amount is None or not isinstance(amount, Money):
+            raise ValueError("Amount is required and must be a Money instance.")
+
+        interest = self.opportunity_interest_repository.get_by_id(interest_id)
+        if interest is None:
+            raise ValueError("OpportunityInterest does not exist.")
+
+        invitation = self.opportunity_invitation_repository.get_by_id(interest.invitation_id)
+        if invitation is None:
+            raise ValueError("OpportunityInvitation does not exist.")
+
+        opportunity = self.opportunity_repository.get_by_id(invitation.opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        provider = self.provider_repository.get_by_id(invitation.provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        existing_access = self.opportunity_access_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+        )
+        if existing_access is not None:
+            raise ValueError("OpportunityAccess already exists for this provider and opportunity.")
+
+        existing_settlement = self.economic_settlement_repository.get_by_interest(interest_id)
+        if existing_settlement is not None:
+            raise ValueError("EconomicSettlement already exists for this interest.")
+
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=interest_id,
+            method=method,
+            amount=amount,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self.economic_settlement_repository.save(settlement)

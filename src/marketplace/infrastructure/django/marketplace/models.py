@@ -286,3 +286,29 @@ class OpportunityInterestModel(models.Model):
 
     class Meta:
         db_table = "marketplace_opportunity_interests"
+
+
+class EconomicSettlementModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    interest = models.OneToOneField(
+        OpportunityInterestModel,
+        on_delete=models.PROTECT,
+        related_name="economic_settlement",
+    )
+    method = models.CharField(max_length=50)
+    amount_minor = models.BigIntegerField()
+    currency = models.CharField(max_length=3)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_economic_settlements"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_minor__gte=0),
+                name="mkt_settlement_amount_gte_zero",
+            )
+        ]
