@@ -241,3 +241,31 @@ class OpportunityAccessModel(models.Model):
                 name="mkt_opp_acc_uniq",
             ),
         ]
+
+
+class OpportunityInvitationModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    opportunity = models.ForeignKey(
+        OpportunityModel,
+        on_delete=models.PROTECT,
+        related_name="invitations",
+    )
+    provider = models.ForeignKey(
+        ProviderModel,
+        on_delete=models.PROTECT,
+        related_name="opportunity_invitations",
+    )
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_opportunity_invitations"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["opportunity", "provider"],
+                name="mkt_opp_inv_uniq",
+            ),
+        ]

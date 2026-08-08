@@ -297,3 +297,23 @@ class MatchingResult:
             normalized_reasons.append(normalized)
 
         object.__setattr__(self, "reasons", tuple(normalized_reasons))
+
+
+@dataclass(slots=True)
+class OpportunityInvitation:
+    id: UUID
+    opportunity_id: UUID
+    provider_id: UUID
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.id is None or not isinstance(self.id, UUID):
+            raise ValueError("OpportunityInvitation id must be a valid UUID instance.")
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("OpportunityInvitation opportunity_id must be a valid UUID instance.")
+        if self.provider_id is None or not isinstance(self.provider_id, UUID):
+            raise ValueError("OpportunityInvitation provider_id must be a valid UUID instance.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("OpportunityInvitation created_at must be a datetime instance.")
+        if self.created_at.tzinfo is None:
+            raise ValueError("OpportunityInvitation created_at must be timezone-aware.")

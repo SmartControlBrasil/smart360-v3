@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.db import IntegrityError
 from django.db.models import ProtectedError
@@ -8,6 +8,7 @@ from django.test import TestCase
 from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
+    OpportunityInvitation,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -18,6 +19,7 @@ from src.marketplace.domain.entities import (
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
+    OpportunityInvitationModel,
     OpportunityModel,
     ProviderModel,
     ProviderServiceModel,
@@ -27,6 +29,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityAccessRepository,
+    DjangoOpportunityInvitationRepository,
     DjangoOpportunityRepository,
     DjangoProviderRepository,
     DjangoProviderServiceRepository,
@@ -1594,3 +1597,191 @@ class DjangoOpportunityAccessRepositoryTests(TestCase):
         )
         with self.assertRaises(ProtectedError):
             ProviderModel.objects.get(id=self.provider_a.id).delete()
+
+
+class DjangoOpportunityInvitationRepositoryTests(TestCase):
+    def setUp(self):
+        self.invitation_repository = DjangoOpportunityInvitationRepository()
+
+        # Build necessary model relations
+        self.org_model = OrganizationModel.objects.create(
+            id=uuid4(),
+            name="Org",
+            slug="org",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.cat_model = ServiceCategoryModel.objects.create(
+            id=uuid4(),
+            name="Cat",
+            slug="cat",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.service_model = ServiceModel.objects.create(
+            id=uuid4(),
+            category=self.cat_model,
+            name="Service",
+            slug="service",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.request_model = ServiceRequestModel.objects.create(
+            id=uuid4(),
+            organization=self.org_model,
+            service=self.service_model,
+            title="Request",
+            description="desc",
+            status=ServiceRequestModel.Status.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opportunity_model_a = OpportunityModel.objects.create(
+            id=uuid4(),
+            service_request=self.request_model,
+            status=OpportunityModel.Status.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        # Create second request/opportunity for multiple opportunities tests
+        self.request_model_b = ServiceRequestModel.objects.create(
+            id=uuid4(),
+            organization=self.org_model,
+            service=self.service_model,
+            title="Request B",
+            description="desc B",
+            status=ServiceRequestModel.Status.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opportunity_model_b = OpportunityModel.objects.create(
+            id=uuid4(),
+            service_request=self.request_model_b,
+            status=OpportunityModel.Status.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.provider_model_a = ProviderModel.objects.create(
+            id=uuid4(),
+            organization=self.org_model,
+            display_name="Provider A",
+            slug="provider-a",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_model_b = ProviderModel.objects.create(
+            id=uuid4(),
+            organization=self.org_model,
+            display_name="Provider B",
+            slug="provider-b",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def _build_invitation(self, opportunity_id: UUID, provider_id: UUID) -> OpportunityInvitation:
+        return OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    def test_save_and_retrieve_invitation(self):
+        invitation = self._build_invitation(
+            self.opportunity_model_a.id,
+            self.provider_model_a.id,
+        )
+        saved = self.invitation_repository.save(invitation)
+        self.assertEqual(saved.id, invitation.id)
+
+        retrieved = self.invitation_repository.get_by_id(invitation.id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.id, invitation.id)
+        self.assertEqual(retrieved.opportunity_id, invitation.opportunity_id)
+        self.assertEqual(retrieved.provider_id, invitation.provider_id)
+
+    def test_get_nonexistent_returns_none(self):
+        self.assertIsNone(self.invitation_repository.get_by_id(uuid4()))
+
+    def test_get_by_opportunity_and_provider(self):
+        invitation = self._build_invitation(
+            self.opportunity_model_a.id,
+            self.provider_model_a.id,
+        )
+        self.invitation_repository.save(invitation)
+
+        retrieved = self.invitation_repository.get_by_opportunity_and_provider(
+            self.opportunity_model_a.id,
+            self.provider_model_a.id,
+        )
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.id, invitation.id)
+
+    def test_get_by_opportunity_and_provider_nonexistent_returns_none(self):
+        self.assertIsNone(
+            self.invitation_repository.get_by_opportunity_and_provider(
+                self.opportunity_model_a.id,
+                self.provider_model_b.id,
+            )
+        )
+
+    def test_list_by_opportunity(self):
+        inv1 = self._build_invitation(self.opportunity_model_a.id, self.provider_model_a.id)
+        inv2 = self._build_invitation(self.opportunity_model_a.id, self.provider_model_b.id)
+        self.invitation_repository.save(inv1)
+        self.invitation_repository.save(inv2)
+
+        results = self.invitation_repository.list_by_opportunity(self.opportunity_model_a.id)
+        self.assertEqual(len(results), 2)
+        self.assertEqual({r.id for r in results}, {inv1.id, inv2.id})
+
+    def test_list_by_provider(self):
+        inv1 = self._build_invitation(self.opportunity_model_a.id, self.provider_model_a.id)
+        inv2 = self._build_invitation(self.opportunity_model_b.id, self.provider_model_a.id)
+        self.invitation_repository.save(inv1)
+        self.invitation_repository.save(inv2)
+
+        results = self.invitation_repository.list_by_provider(self.provider_model_a.id)
+        self.assertEqual(len(results), 2)
+        self.assertEqual({r.id for r in results}, {inv1.id, inv2.id})
+
+    def test_count_by_opportunity(self):
+        inv1 = self._build_invitation(self.opportunity_model_a.id, self.provider_model_a.id)
+        self.invitation_repository.save(inv1)
+        self.assertEqual(
+            self.invitation_repository.count_by_opportunity(self.opportunity_model_a.id),
+            1,
+        )
+
+    def test_unique_opportunity_and_provider_constraint(self):
+        inv1 = self._build_invitation(self.opportunity_model_a.id, self.provider_model_a.id)
+        self.invitation_repository.save(inv1)
+
+        inv2 = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=self.opportunity_model_a.id,
+            provider_id=self.provider_model_a.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(IntegrityError):
+            self.invitation_repository.save(inv2)
+
+    def test_protect_prevents_opportunity_delete_when_linked(self):
+        inv = self._build_invitation(self.opportunity_model_a.id, self.provider_model_a.id)
+        self.invitation_repository.save(inv)
+        with self.assertRaises(ProtectedError):
+            OpportunityModel.objects.get(id=self.opportunity_model_a.id).delete()
+
+    def test_protect_prevents_provider_delete_when_linked(self):
+        inv = self._build_invitation(self.opportunity_model_a.id, self.provider_model_a.id)
+        self.invitation_repository.save(inv)
+        with self.assertRaises(ProtectedError):
+            ProviderModel.objects.get(id=self.provider_model_a.id).delete()

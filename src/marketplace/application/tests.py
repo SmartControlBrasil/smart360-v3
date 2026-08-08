@@ -14,12 +14,14 @@ from src.marketplace.application.use_cases import (
     DiscoverCandidates,
     DistributeOpportunity,
     GrantOpportunityAccess,
+    InviteProviderToOpportunity,
     RankCandidates,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
     Opportunity,
     OpportunityAccess,
+    OpportunityInvitation,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -824,6 +826,58 @@ class InMemoryOpportunityAccessRepository:
         self,
         provider_id: UUID,
     ) -> list[OpportunityAccess]:
+        return [
+            item
+            for item in self._items.values()
+            if item.provider_id == provider_id
+        ]
+
+    def count_by_opportunity(self, opportunity_id: UUID) -> int:
+        return len(self.list_by_opportunity(opportunity_id))
+
+
+class InMemoryOpportunityInvitationRepository:
+    def __init__(self):
+        self._items: dict[str, OpportunityInvitation] = {}
+        self.save_calls = 0
+        self.last_saved: OpportunityInvitation | None = None
+
+    def save(self, invitation: OpportunityInvitation) -> OpportunityInvitation:
+        self.save_calls += 1
+        self.last_saved = invitation
+        self._items[str(invitation.id)] = invitation
+        return invitation
+
+    def get_by_id(self, invitation_id: UUID) -> OpportunityInvitation | None:
+        return self._items.get(str(invitation_id))
+
+    def get_by_opportunity_and_provider(
+        self,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityInvitation | None:
+        for item in self._items.values():
+            if (
+                item.opportunity_id == opportunity_id
+                and item.provider_id == provider_id
+            ):
+                return item
+        return None
+
+    def list_by_opportunity(
+        self,
+        opportunity_id: UUID,
+    ) -> list[OpportunityInvitation]:
+        return [
+            item
+            for item in self._items.values()
+            if item.opportunity_id == opportunity_id
+        ]
+
+    def list_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[OpportunityInvitation]:
         return [
             item
             for item in self._items.values()
@@ -2339,6 +2393,234 @@ class GrantOpportunityAccessTests(SimpleTestCase):
         self.assertEqual(granted.provider_id, second_provider.id)
 
 
+class InviteProviderToOpportunityTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        service_id: UUID,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=service_id,
+            title="Demanda tecnica",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _opportunity(
+        opportunity_id: UUID,
+        *,
+        service_request_id: UUID,
+        status: OpportunityStatus = OpportunityStatus.OPEN,
+    ) -> Opportunity:
+        now = datetime.now(timezone.utc)
+        return Opportunity(
+            id=opportunity_id,
+            service_request_id=service_request_id,
+            status=status,
+            max_accesses=3,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider",
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_invalid_opportunity_id_rejected(self):
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=None, provider_id=uuid4())
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id="invalid-uuid", provider_id=uuid4())
+
+    def test_invalid_provider_id_rejected(self):
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=uuid4(), provider_id=None)
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=uuid4(), provider_id="invalid-uuid")
+
+    def test_nonexistent_opportunity_rejected(self):
+        provider = self._provider(uuid4())
+        p_repo = InMemoryProviderRepository()
+        p_repo.save(provider)
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            provider_repository=p_repo,
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=uuid4(), provider_id=provider.id)
+
+    def test_closed_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CLOSED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+    def test_cancelled_opportunity_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id, status=OpportunityStatus.CANCELLED)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+    def test_nonexistent_provider_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        req_repo = InMemoryServiceRequestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=opp_repo,
+            provider_repository=InMemoryProviderRepository(),
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=opportunity.id, provider_id=uuid4())
+
+    def test_inactive_provider_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4(), is_active=False)
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=InMemoryOpportunityInvitationRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+    def test_duplicate_invitation_rejected(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        inv_repo.save(
+            OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+    def test_valid_invitation_created(self):
+        opp_repo = InMemoryOpportunityRepository()
+        p_repo = InMemoryProviderRepository()
+        req_repo = InMemoryServiceRequestRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+
+        request = self._service_request(uuid4(), service_id=uuid4())
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4())
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+
+        use_case = InviteProviderToOpportunity(
+            opportunity_repository=opp_repo,
+            provider_repository=p_repo,
+            opportunity_invitation_repository=inv_repo,
+        )
+        invitation = use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertEqual(invitation.opportunity_id, opportunity.id)
+        self.assertEqual(invitation.provider_id, provider.id)
+        self.assertIsNotNone(invitation.id)
+        self.assertIsNotNone(invitation.created_at.tzinfo)
+
+
 class TechnicalMatchingPolicyV1Tests(SimpleTestCase):
     @staticmethod
     def _service_request() -> ServiceRequest:
@@ -2755,20 +3037,20 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_invalid_opportunity_id_rejected(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
         with self.assertRaises(ValueError):
@@ -2780,20 +3062,20 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_nonexistent_opportunity_rejected(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
         with self.assertRaises(ValueError):
@@ -2802,7 +3084,7 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_closed_opportunity_rejected(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
@@ -2815,14 +3097,14 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
         with self.assertRaises(ValueError):
@@ -2831,7 +3113,7 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_cancelled_opportunity_rejected(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
@@ -2844,14 +3126,14 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
         with self.assertRaises(ValueError):
@@ -2860,7 +3142,7 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_no_ranked_candidates_returns_empty(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
@@ -2873,14 +3155,14 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
         results = use_case.execute(opportunity_id=opportunity.id)
@@ -2889,7 +3171,7 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_one_ranked_candidate_with_capacity_granted(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
@@ -2906,17 +3188,17 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
-        results = use_case.execute(opportunity_id=opportunity.id)
+        results = use_case.execute(opportunity_id=opportunity.id, max_invitations=2)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].provider_id, provider.id)
         self.assertEqual(results[0].opportunity_id, opportunity.id)
@@ -2924,16 +3206,14 @@ class DistributeOpportunityTests(SimpleTestCase):
     def test_multiple_candidates_granted_up_to_capacity_and_respecting_ranking_order(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
         service_id = uuid4()
         request = self._service_request(uuid4(), service_id=service_id)
-        opportunity = self._opportunity(uuid4(), service_request_id=request.id, max_accesses=2)
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
 
-        # 3 providers, but max_accesses is 2.
-        # We will use FakeMatchingPolicy to rank them.
         p1 = self._provider(uuid4(), display_name="Low Score")
         p2 = self._provider(uuid4(), display_name="High Score")
         p3 = self._provider(uuid4(), display_name="Mid Score")
@@ -2945,7 +3225,6 @@ class DistributeOpportunityTests(SimpleTestCase):
         req_repo.save(request)
         opp_repo.save(opportunity)
 
-        # Ranking: High Score (90), Mid Score (70), Low Score (20)
         fake_policy = FakeMatchingPolicy({
             p1.id: 20,
             p2.id: 90,
@@ -2954,36 +3233,33 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, fake_policy)
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
-        results = use_case.execute(opportunity_id=opportunity.id)
+        results = use_case.execute(opportunity_id=opportunity.id, max_invitations=2)
 
-        # Only 2 out of 3 should be granted due to max_accesses=2 limit.
         self.assertEqual(len(results), 2)
-        # Should respect ranking order: p2 (90) then p3 (70)
         self.assertEqual(results[0].provider_id, p2.id)
         self.assertEqual(results[1].provider_id, p3.id)
 
-    def test_existing_accesses_skipped_and_reduces_remaining_capacity(self):
+    def test_existing_invitations_skipped_and_reduces_remaining_capacity(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
         service_id = uuid4()
         request = self._service_request(uuid4(), service_id=service_id)
-        opportunity = self._opportunity(uuid4(), service_request_id=request.id, max_accesses=2)
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
 
-        # B = 90, C = 70, A = 50
         pb = self._provider(uuid4(), display_name="B")
         pc = self._provider(uuid4(), display_name="C")
         pa = self._provider(uuid4(), display_name="A")
@@ -2995,14 +3271,13 @@ class DistributeOpportunityTests(SimpleTestCase):
         req_repo.save(request)
         opp_repo.save(opportunity)
 
-        # B already has access.
-        existing_access = OpportunityAccess(
+        existing_inv = OpportunityInvitation(
             id=uuid4(),
             opportunity_id=opportunity.id,
             provider_id=pb.id,
             created_at=datetime.now(timezone.utc),
         )
-        access_repo.save(existing_access)
+        inv_repo.save(existing_inv)
 
         fake_policy = FakeMatchingPolicy({
             pb.id: 90,
@@ -3012,33 +3287,31 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, fake_policy)
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
-        results = use_case.execute(opportunity_id=opportunity.id)
+        results = use_case.execute(opportunity_id=opportunity.id, max_invitations=2)
 
-        # Max accesses is 2, 1 exists (B). Remaining is 1.
-        # Next ranked candidate is C. A should not receive access.
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].provider_id, pc.id)
 
     def test_distribute_when_capacity_full_returns_empty(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
         service_id = uuid4()
         request = self._service_request(uuid4(), service_id=service_id)
-        opportunity = self._opportunity(uuid4(), service_request_id=request.id, max_accesses=1)
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
         p = self._provider(uuid4(), display_name="Provider A")
 
         req_repo.save(request)
@@ -3046,29 +3319,29 @@ class DistributeOpportunityTests(SimpleTestCase):
         p_repo.save(p)
         ps_repo.save(self._provider_service(provider_id=p.id, service_id=service_id))
 
-        access_repo.save(
-            OpportunityAccess(id=uuid4(), opportunity_id=opportunity.id, provider_id=p.id, created_at=datetime.now(timezone.utc))
+        inv_repo.save(
+            OpportunityInvitation(id=uuid4(), opportunity_id=opportunity.id, provider_id=p.id, created_at=datetime.now(timezone.utc))
         )
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
-        results = use_case.execute(opportunity_id=opportunity.id)
+        results = use_case.execute(opportunity_id=opportunity.id, max_invitations=1)
         self.assertEqual(results, [])
 
     def test_closed_service_request_rejected(self):
         req_repo = InMemoryServiceRequestRepository()
         opp_repo = InMemoryOpportunityRepository()
-        access_repo = InMemoryOpportunityAccessRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
         p_repo = InMemoryProviderRepository()
         ps_repo = InMemoryProviderServiceRepository()
 
@@ -3080,15 +3353,54 @@ class DistributeOpportunityTests(SimpleTestCase):
 
         discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
         ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
-        grant_access = GrantOpportunityAccess(opp_repo, access_repo, p_repo)
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
 
         use_case = DistributeOpportunity(
             opportunity_repository=opp_repo,
             service_request_repository=req_repo,
-            opportunity_access_repository=access_repo,
+            opportunity_invitation_repository=inv_repo,
             rank_candidates=ranking,
-            grant_opportunity_access=grant_access,
+            invite_provider_to_opportunity=invite_usecase,
         )
 
         with self.assertRaises(ValueError):
             use_case.execute(opportunity_id=opportunity.id)
+
+    def test_critical_regression_distribute_does_not_create_opportunity_access(self):
+        req_repo = InMemoryServiceRequestRepository()
+        opp_repo = InMemoryOpportunityRepository()
+        inv_repo = InMemoryOpportunityInvitationRepository()
+        access_repo = InMemoryOpportunityAccessRepository()
+        p_repo = InMemoryProviderRepository()
+        ps_repo = InMemoryProviderServiceRepository()
+
+        service_id = uuid4()
+        request = self._service_request(uuid4(), service_id=service_id)
+        opportunity = self._opportunity(uuid4(), service_request_id=request.id)
+        provider = self._provider(uuid4(), display_name="Provider A")
+        capability = self._provider_service(provider_id=provider.id, service_id=service_id)
+
+        req_repo.save(request)
+        opp_repo.save(opportunity)
+        p_repo.save(provider)
+        ps_repo.save(capability)
+
+        discovery = DiscoverCandidates(req_repo, ps_repo, p_repo)
+        ranking = RankCandidates(discovery, req_repo, TechnicalMatchingPolicyV1())
+        invite_usecase = InviteProviderToOpportunity(opp_repo, p_repo, inv_repo)
+
+        use_case = DistributeOpportunity(
+            opportunity_repository=opp_repo,
+            service_request_repository=req_repo,
+            opportunity_invitation_repository=inv_repo,
+            rank_candidates=ranking,
+            invite_provider_to_opportunity=invite_usecase,
+        )
+
+        # Distribute should only invoke InviteProviderToOpportunity and save invitations.
+        # It must NOT call GrantOpportunityAccess or save in access_repo.
+        results = use_case.execute(opportunity_id=opportunity.id, max_invitations=3)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(inv_repo.save_calls, 1)
+        self.assertEqual(access_repo.save_calls, 0)

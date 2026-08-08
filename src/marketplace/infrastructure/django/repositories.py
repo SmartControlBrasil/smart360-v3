@@ -2,6 +2,7 @@ from uuid import UUID
 
 from src.marketplace.application.ports import (
     OpportunityAccessRepository,
+    OpportunityInvitationRepository,
     OpportunityRepository,
     ProviderRepository,
     ProviderServiceRepository,
@@ -12,6 +13,7 @@ from src.marketplace.application.ports import (
 from src.marketplace.domain.entities import (
     Opportunity,
     OpportunityAccess,
+    OpportunityInvitation,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -22,6 +24,7 @@ from src.marketplace.domain.entities import (
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
+    OpportunityInvitationModel,
     OpportunityModel,
     ProviderModel,
     ProviderServiceModel,
@@ -460,5 +463,71 @@ class DjangoOpportunityAccessRepository(OpportunityAccessRepository):
 
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         return OpportunityAccessModel.objects.filter(
+            opportunity_id=opportunity_id,
+        ).count()
+
+
+class DjangoOpportunityInvitationRepository(OpportunityInvitationRepository):
+    @staticmethod
+    def _to_entity(model: OpportunityInvitationModel) -> OpportunityInvitation:
+        return OpportunityInvitation(
+            id=model.id,
+            opportunity_id=model.opportunity_id,
+            provider_id=model.provider_id,
+            created_at=model.created_at,
+        )
+
+    def save(self, invitation: OpportunityInvitation) -> OpportunityInvitation:
+        model, _ = OpportunityInvitationModel.objects.update_or_create(
+            id=invitation.id,
+            defaults={
+                "opportunity_id": invitation.opportunity_id,
+                "provider_id": invitation.provider_id,
+                "created_at": invitation.created_at,
+            },
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, invitation_id: UUID) -> OpportunityInvitation | None:
+        try:
+            model = OpportunityInvitationModel.objects.get(id=invitation_id)
+        except OpportunityInvitationModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def get_by_opportunity_and_provider(
+        self,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityInvitation | None:
+        try:
+            model = OpportunityInvitationModel.objects.get(
+                opportunity_id=opportunity_id,
+                provider_id=provider_id,
+            )
+        except OpportunityInvitationModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def list_by_opportunity(
+        self,
+        opportunity_id: UUID,
+    ) -> list[OpportunityInvitation]:
+        models = OpportunityInvitationModel.objects.filter(
+            opportunity_id=opportunity_id,
+        ).order_by("created_at", "id")
+        return [self._to_entity(model) for model in models]
+
+    def list_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[OpportunityInvitation]:
+        models = OpportunityInvitationModel.objects.filter(
+            provider_id=provider_id,
+        ).order_by("created_at", "id")
+        return [self._to_entity(model) for model in models]
+
+    def count_by_opportunity(self, opportunity_id: UUID) -> int:
+        return OpportunityInvitationModel.objects.filter(
             opportunity_id=opportunity_id,
         ).count()

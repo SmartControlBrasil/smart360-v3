@@ -7,6 +7,7 @@ from src.marketplace.domain.entities import (
     MatchingResult,
     Opportunity,
     OpportunityAccess,
+    OpportunityInvitation,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -772,3 +773,71 @@ class MatchingResultDomainTests(SimpleTestCase):
             reasons=("some_reason",)
         )
         self.assertEqual(res.score, 100)
+
+
+class OpportunityInvitationDomainTests(SimpleTestCase):
+    def test_valid_creation(self):
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.assertIsNotNone(invitation.id)
+
+    def test_id_invalid_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id=None,
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id="invalid-uuid",
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_opportunity_id_invalid_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id=None,
+                provider_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id="invalid-uuid",
+                provider_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_provider_id_invalid_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id=uuid4(),
+                provider_id=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id=uuid4(),
+                provider_id="invalid-uuid",
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_naive_created_at_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                created_at=datetime.now(),
+            )

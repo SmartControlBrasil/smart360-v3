@@ -5,6 +5,7 @@ from src.marketplace.domain.entities import (
     MatchingResult,
     Opportunity,
     OpportunityAccess,
+    OpportunityInvitation,
     Provider,
     ProviderService,
     Service,
@@ -184,4 +185,40 @@ class MatchingPolicy(Protocol):
         service_request: ServiceRequest,
         provider: Provider,
     ) -> MatchingResult:
+        ...
+
+
+class OpportunityInvitationRepository(Protocol):
+    def save(
+        self,
+        invitation: OpportunityInvitation,
+    ) -> OpportunityInvitation:
+        ...
+
+    def get_by_id(
+        self,
+        invitation_id: UUID,
+    ) -> OpportunityInvitation | None:
+        ...
+
+    def get_by_opportunity_and_provider(
+        self,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityInvitation | None:
+        ...
+
+    def list_by_opportunity(
+        self,
+        opportunity_id: UUID,
+    ) -> list[OpportunityInvitation]:
+        ...
+
+    def list_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[OpportunityInvitation]:
+        ...
+
+    def count_by_opportunity(self, opportunity_id: UUID) -> int:
         ...

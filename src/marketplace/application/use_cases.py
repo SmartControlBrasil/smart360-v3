@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from src.marketplace.application.ports import (
     MatchingPolicy,
     OpportunityAccessRepository,
+    OpportunityInvitationRepository,
     OpportunityRepository,
     ProviderRepository,
     ProviderServiceRepository,
@@ -15,6 +16,7 @@ from src.marketplace.domain.entities import (
     MatchingResult,
     Opportunity,
     OpportunityAccess,
+    OpportunityInvitation,
     OpportunityStatus,
     Provider,
     ProviderService,
@@ -542,30 +544,86 @@ class RankCandidates:
         )
 
 
-class DistributeOpportunity:
+class InviteProviderToOpportunity:
     def __init__(
         self,
         opportunity_repository: OpportunityRepository,
-        service_request_repository: ServiceRequestRepository,
-        opportunity_access_repository: OpportunityAccessRepository,
-        rank_candidates: RankCandidates,
-        grant_opportunity_access: GrantOpportunityAccess,
+        provider_repository: ProviderRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
     ):
         self.opportunity_repository = opportunity_repository
-        self.service_request_repository = service_request_repository
-        self.opportunity_access_repository = opportunity_access_repository
-        self.rank_candidates = rank_candidates
-        self.grant_opportunity_access = grant_opportunity_access
+        self.provider_repository = provider_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
 
     def execute(
         self,
         *,
         opportunity_id: UUID,
-    ) -> list[OpportunityAccess]:
+        provider_id: UUID,
+    ) -> OpportunityInvitation:
+        if opportunity_id is None or not isinstance(opportunity_id, UUID):
+            raise ValueError("Opportunity id is required and must be a UUID instance.")
+        if provider_id is None or not isinstance(provider_id, UUID):
+            raise ValueError("Provider id is required and must be a UUID instance.")
+
+        opportunity = self.opportunity_repository.get_by_id(opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        provider = self.provider_repository.get_by_id(provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        existing = self.opportunity_invitation_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+        )
+        if existing is not None:
+            raise ValueError("OpportunityInvitation already exists for this provider.")
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self.opportunity_invitation_repository.save(invitation)
+
+
+class DistributeOpportunity:
+    def __init__(
+        self,
+        opportunity_repository: OpportunityRepository,
+        service_request_repository: ServiceRequestRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
+        rank_candidates: RankCandidates,
+        invite_provider_to_opportunity: InviteProviderToOpportunity,
+    ):
+        self.opportunity_repository = opportunity_repository
+        self.service_request_repository = service_request_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
+        self.rank_candidates = rank_candidates
+        self.invite_provider_to_opportunity = invite_provider_to_opportunity
+
+    def execute(
+        self,
+        *,
+        opportunity_id: UUID,
+        max_invitations: int = 3,
+    ) -> list[OpportunityInvitation]:
         if opportunity_id is None:
             raise ValueError("Opportunity id is required.")
         if not isinstance(opportunity_id, UUID):
             raise ValueError("Opportunity id must be a valid UUID instance.")
+
+        if isinstance(max_invitations, bool) or not isinstance(max_invitations, int):
+            raise ValueError("max_invitations must be an integer.")
+        if max_invitations < 1:
+            raise ValueError("max_invitations must be at least 1.")
 
         opportunity = self.opportunity_repository.get_by_id(opportunity_id)
         if opportunity is None:
@@ -580,30 +638,30 @@ class DistributeOpportunity:
         # Rank candidates (this will also validate service request status/existence)
         ranked_results = self.rank_candidates.execute(service_request_id=service_request.id)
 
-        # Get existing accesses
-        existing_accesses = self.opportunity_access_repository.list_by_opportunity(opportunity.id)
-        existing_provider_ids = {access.provider_id for access in existing_accesses}
+        # Get existing invitations
+        existing_invitations = self.opportunity_invitation_repository.list_by_opportunity(opportunity.id)
+        existing_provider_ids = {inv.provider_id for inv in existing_invitations}
 
-        remaining_capacity = opportunity.max_accesses - len(existing_accesses)
+        remaining_capacity = max_invitations - len(existing_invitations)
         if remaining_capacity <= 0:
             return []
 
-        # Filter out providers who already have access
-        candidates_to_grant = [
+        # Filter out providers who already have invitation
+        candidates_to_invite = [
             result.provider
             for result in ranked_results
             if result.provider.id not in existing_provider_ids
         ]
 
         # Take up to remaining_capacity
-        selected_providers = candidates_to_grant[:remaining_capacity]
+        selected_providers = candidates_to_invite[:remaining_capacity]
 
-        granted_accesses: list[OpportunityAccess] = []
+        granted_invitations: list[OpportunityInvitation] = []
         for provider in selected_providers:
-            access = self.grant_opportunity_access.execute(
+            invitation = self.invite_provider_to_opportunity.execute(
                 opportunity_id=opportunity.id,
                 provider_id=provider.id,
             )
-            granted_accesses.append(access)
+            granted_invitations.append(invitation)
 
-        return granted_accesses
+        return granted_invitations
