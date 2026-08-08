@@ -4,13 +4,18 @@ from uuid import UUID, uuid4
 from django.test import SimpleTestCase
 
 from src.marketplace.application.use_cases import (
+    CreateOpportunity,
     CreateProvider,
     CreateProviderService,
     CreateService,
     CreateServiceCategory,
     CreateServiceRequest,
+    GrantOpportunityAccess,
 )
 from src.marketplace.domain.entities import (
+    Opportunity,
+    OpportunityAccess,
+    OpportunityStatus,
     Provider,
     ProviderService,
     Service,
@@ -740,6 +745,90 @@ class InMemoryServiceRequestRepository:
         ]
 
 
+class InMemoryOpportunityRepository:
+    def __init__(self):
+        self._items: dict[str, Opportunity] = {}
+        self.save_calls = 0
+        self.last_saved: Opportunity | None = None
+
+    def save(self, opportunity: Opportunity) -> Opportunity:
+        self.save_calls += 1
+        self.last_saved = opportunity
+        self._items[str(opportunity.id)] = opportunity
+        return opportunity
+
+    def get_by_id(self, opportunity_id: UUID) -> Opportunity | None:
+        return self._items.get(str(opportunity_id))
+
+    def get_by_service_request(
+        self,
+        service_request_id: UUID,
+    ) -> Opportunity | None:
+        for item in self._items.values():
+            if item.service_request_id == service_request_id:
+                return item
+        return None
+
+    def list_open(self) -> list[Opportunity]:
+        return [
+            item
+            for item in self._items.values()
+            if item.status == OpportunityStatus.OPEN
+        ]
+
+
+class InMemoryOpportunityAccessRepository:
+    def __init__(self):
+        self._items: dict[str, OpportunityAccess] = {}
+        self.save_calls = 0
+        self.last_saved: OpportunityAccess | None = None
+
+    def save(self, access: OpportunityAccess) -> OpportunityAccess:
+        self.save_calls += 1
+        self.last_saved = access
+        self._items[str(access.id)] = access
+        return access
+
+    def get_by_id(self, access_id: UUID) -> OpportunityAccess | None:
+        return self._items.get(str(access_id))
+
+    def get_by_opportunity_and_provider(
+        self,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityAccess | None:
+        for item in self._items.values():
+            if (
+                item.opportunity_id == opportunity_id
+                and item.provider_id == provider_id
+            ):
+                return item
+        return None
+
+    def list_by_opportunity(
+        self,
+        opportunity_id: UUID,
+    ) -> list[OpportunityAccess]:
+        return [
+            item
+            for item in self._items.values()
+            if item.opportunity_id == opportunity_id
+        ]
+
+    def list_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[OpportunityAccess]:
+        return [
+            item
+            for item in self._items.values()
+            if item.provider_id == provider_id
+        ]
+
+    def count_by_opportunity(self, opportunity_id: UUID) -> int:
+        return len(self.list_by_opportunity(opportunity_id))
+
+
 class CreateProviderServiceTests(SimpleTestCase):
     @staticmethod
     def _active_provider(provider_id: UUID, organization_id: UUID) -> Provider:
@@ -1267,3 +1356,504 @@ class CreateServiceRequestTests(SimpleTestCase):
                 service_id=service.id,
                 title="   ",
             )
+
+
+class CreateOpportunityTests(SimpleTestCase):
+    @staticmethod
+    def _service_request(
+        service_request_id: UUID,
+        *,
+        status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+    ) -> ServiceRequest:
+        now = datetime.now(timezone.utc)
+        return ServiceRequest(
+            id=service_request_id,
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Demanda",
+            description="Descricao",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_valid_creation(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        service_request = self._service_request(uuid4())
+        service_request_repository.save(service_request)
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        created = use_case.execute(service_request_id=service_request.id)
+
+        self.assertIsInstance(created.id, UUID)
+        self.assertEqual(created.status, OpportunityStatus.OPEN)
+        self.assertEqual(created.max_accesses, 3)
+        self.assertEqual(created.service_request_id, service_request.id)
+        self.assertIsNotNone(created.created_at.tzinfo)
+        self.assertIsNotNone(created.updated_at.tzinfo)
+        self.assertEqual(opportunity_repository.save_calls, 1)
+
+    def test_service_request_id_invalid_rejected_before_repository(self):
+        class SpyServiceRequestRepository(InMemoryServiceRequestRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(
+                self,
+                service_request_id: UUID,
+            ) -> ServiceRequest | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(service_request_id)
+
+        class SpyOpportunityRepository(InMemoryOpportunityRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_service_request_calls = 0
+
+            def get_by_service_request(
+                self,
+                service_request_id: UUID,
+            ) -> Opportunity | None:
+                self.get_by_service_request_calls += 1
+                return super().get_by_service_request(service_request_id)
+
+        service_request_repository = SpyServiceRequestRepository()
+        opportunity_repository = SpyOpportunityRepository()
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id="invalid-uuid")
+
+        self.assertEqual(service_request_repository.get_by_id_calls, 0)
+        self.assertEqual(opportunity_repository.get_by_service_request_calls, 0)
+        self.assertEqual(opportunity_repository.save_calls, 0)
+
+    def test_max_accesses_invalid_rejected_before_repository(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=uuid4(), max_accesses=True)
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=uuid4(), max_accesses=0)
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=uuid4(), max_accesses="3")
+
+    def test_service_request_not_found_is_rejected(self):
+        use_case = CreateOpportunity(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            service_request_repository=InMemoryServiceRequestRepository(),
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=uuid4())
+
+    def test_service_request_cancelled_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        service_request = self._service_request(
+            uuid4(),
+            status=ServiceRequestStatus.CANCELLED,
+        )
+        service_request_repository.save(service_request)
+        use_case = CreateOpportunity(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=service_request.id)
+
+    def test_service_request_closed_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        service_request = self._service_request(
+            uuid4(),
+            status=ServiceRequestStatus.CLOSED,
+        )
+        service_request_repository.save(service_request)
+        use_case = CreateOpportunity(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=service_request.id)
+
+    def test_existing_open_opportunity_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        service_request = self._service_request(uuid4())
+        service_request_repository.save(service_request)
+        opportunity_repository.save(
+            Opportunity(
+                id=uuid4(),
+                service_request_id=service_request.id,
+                status=OpportunityStatus.OPEN,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=service_request.id)
+
+    def test_existing_closed_opportunity_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        service_request = self._service_request(uuid4())
+        service_request_repository.save(service_request)
+        opportunity_repository.save(
+            Opportunity(
+                id=uuid4(),
+                service_request_id=service_request.id,
+                status=OpportunityStatus.CLOSED,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=service_request.id)
+
+    def test_existing_cancelled_opportunity_is_rejected(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        service_request = self._service_request(uuid4())
+        service_request_repository.save(service_request)
+        opportunity_repository.save(
+            Opportunity(
+                id=uuid4(),
+                service_request_id=service_request.id,
+                status=OpportunityStatus.CANCELLED,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(service_request_id=service_request.id)
+
+    def test_custom_max_accesses_is_preserved(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        service_request = self._service_request(uuid4())
+        service_request_repository.save(service_request)
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        created = use_case.execute(
+            service_request_id=service_request.id,
+            max_accesses=5,
+        )
+
+        self.assertEqual(created.max_accesses, 5)
+
+
+class GrantOpportunityAccessTests(SimpleTestCase):
+    @staticmethod
+    def _provider(
+        provider_id: UUID,
+        *,
+        is_active: bool = True,
+    ) -> Provider:
+        now = datetime.now(timezone.utc)
+        return Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider Teste",
+            slug=f"provider-{provider_id}",
+            description="desc",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _opportunity(
+        opportunity_id: UUID,
+        *,
+        status: OpportunityStatus = OpportunityStatus.OPEN,
+        max_accesses: int = 3,
+    ) -> Opportunity:
+        now = datetime.now(timezone.utc)
+        return Opportunity(
+            id=opportunity_id,
+            service_request_id=uuid4(),
+            status=status,
+            max_accesses=max_accesses,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_valid_grant(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        provider_repository = InMemoryProviderRepository()
+        opportunity = self._opportunity(uuid4())
+        provider = self._provider(uuid4())
+        opportunity_repository.save(opportunity)
+        provider_repository.save(provider)
+
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+
+        granted = use_case.execute(
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+        )
+
+        self.assertIsInstance(granted.id, UUID)
+        self.assertEqual(granted.opportunity_id, opportunity.id)
+        self.assertEqual(granted.provider_id, provider.id)
+        self.assertIsNotNone(granted.created_at.tzinfo)
+        self.assertEqual(access_repository.save_calls, 1)
+
+    def test_opportunity_id_invalid_rejected_before_repositories(self):
+        class SpyOpportunityRepository(InMemoryOpportunityRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, opportunity_id: UUID) -> Opportunity | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(opportunity_id)
+
+        class SpyProviderRepository(InMemoryProviderRepository):
+            def __init__(self):
+                super().__init__()
+                self.get_by_id_calls = 0
+
+            def get_by_id(self, provider_id: UUID) -> Provider | None:
+                self.get_by_id_calls += 1
+                return super().get_by_id(provider_id)
+
+        opportunity_repository = SpyOpportunityRepository()
+        provider_repository = SpyProviderRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id="invalid-uuid",
+                provider_id=uuid4(),
+            )
+
+        self.assertEqual(opportunity_repository.get_by_id_calls, 0)
+        self.assertEqual(provider_repository.get_by_id_calls, 0)
+        self.assertEqual(access_repository.save_calls, 0)
+
+    def test_provider_id_invalid_rejected_before_repositories(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        provider_repository = InMemoryProviderRepository()
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id=uuid4(),
+                provider_id="invalid-uuid",
+            )
+
+        self.assertEqual(access_repository.save_calls, 0)
+
+    def test_opportunity_not_found_is_rejected(self):
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=InMemoryOpportunityRepository(),
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            provider_repository=InMemoryProviderRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=uuid4(), provider_id=uuid4())
+
+    def test_opportunity_closed_is_rejected(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        provider_repository = InMemoryProviderRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        opportunity = self._opportunity(uuid4(), status=OpportunityStatus.CLOSED)
+        provider = self._provider(uuid4())
+        opportunity_repository.save(opportunity)
+        provider_repository.save(provider)
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+            )
+
+    def test_opportunity_cancelled_is_rejected(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        provider_repository = InMemoryProviderRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        opportunity = self._opportunity(uuid4(), status=OpportunityStatus.CANCELLED)
+        provider = self._provider(uuid4())
+        opportunity_repository.save(opportunity)
+        provider_repository.save(provider)
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+            )
+
+    def test_provider_not_found_is_rejected(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        opportunity = self._opportunity(uuid4())
+        opportunity_repository.save(opportunity)
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            provider_repository=InMemoryProviderRepository(),
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(opportunity_id=opportunity.id, provider_id=uuid4())
+
+    def test_provider_inactive_is_rejected(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        provider_repository = InMemoryProviderRepository()
+        opportunity = self._opportunity(uuid4())
+        provider = self._provider(uuid4(), is_active=False)
+        opportunity_repository.save(opportunity)
+        provider_repository.save(provider)
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=InMemoryOpportunityAccessRepository(),
+            provider_repository=provider_repository,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+            )
+
+    def test_duplicate_access_is_rejected(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        provider_repository = InMemoryProviderRepository()
+        opportunity = self._opportunity(uuid4())
+        provider = self._provider(uuid4())
+        opportunity_repository.save(opportunity)
+        provider_repository.save(provider)
+        access_repository.save(
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+            )
+
+    def test_max_accesses_reached_is_rejected(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        provider_repository = InMemoryProviderRepository()
+        opportunity = self._opportunity(uuid4(), max_accesses=1)
+        first_provider = self._provider(uuid4())
+        second_provider = self._provider(uuid4())
+        opportunity_repository.save(opportunity)
+        provider_repository.save(first_provider)
+        provider_repository.save(second_provider)
+        access_repository.save(
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=opportunity.id,
+                provider_id=first_provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+        with self.assertRaises(ValueError):
+            use_case.execute(
+                opportunity_id=opportunity.id,
+                provider_id=second_provider.id,
+            )
+
+    def test_below_max_accesses_allows_grant(self):
+        opportunity_repository = InMemoryOpportunityRepository()
+        access_repository = InMemoryOpportunityAccessRepository()
+        provider_repository = InMemoryProviderRepository()
+        opportunity = self._opportunity(uuid4(), max_accesses=2)
+        first_provider = self._provider(uuid4())
+        second_provider = self._provider(uuid4())
+        opportunity_repository.save(opportunity)
+        provider_repository.save(first_provider)
+        provider_repository.save(second_provider)
+        access_repository.save(
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=opportunity.id,
+                provider_id=first_provider.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        use_case = GrantOpportunityAccess(
+            opportunity_repository=opportunity_repository,
+            opportunity_access_repository=access_repository,
+            provider_repository=provider_repository,
+        )
+
+        granted = use_case.execute(
+            opportunity_id=opportunity.id,
+            provider_id=second_provider.id,
+        )
+        self.assertEqual(granted.provider_id, second_provider.id)

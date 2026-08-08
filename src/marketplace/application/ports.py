@@ -2,6 +2,8 @@ from typing import Protocol
 from uuid import UUID
 
 from src.marketplace.domain.entities import (
+    Opportunity,
+    OpportunityAccess,
     Provider,
     ProviderService,
     Service,
@@ -124,4 +126,51 @@ class ServiceRequestRepository(Protocol):
         self,
         service_id: UUID,
     ) -> list[ServiceRequest]:
+        ...
+
+
+class OpportunityRepository(Protocol):
+    def save(self, opportunity: Opportunity) -> Opportunity:
+        ...
+
+    def get_by_id(self, opportunity_id: UUID) -> Opportunity | None:
+        ...
+
+    def get_by_service_request(
+        self,
+        service_request_id: UUID,
+    ) -> Opportunity | None:
+        ...
+
+    def list_open(self) -> list[Opportunity]:
+        ...
+
+
+class OpportunityAccessRepository(Protocol):
+    def save(self, access: OpportunityAccess) -> OpportunityAccess:
+        ...
+
+    def get_by_id(self, access_id: UUID) -> OpportunityAccess | None:
+        ...
+
+    def get_by_opportunity_and_provider(
+        self,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityAccess | None:
+        ...
+
+    def list_by_opportunity(
+        self,
+        opportunity_id: UUID,
+    ) -> list[OpportunityAccess]:
+        ...
+
+    def list_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[OpportunityAccess]:
+        ...
+
+    def count_by_opportunity(self, opportunity_id: UUID) -> int:
         ...

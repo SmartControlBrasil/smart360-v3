@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from src.marketplace.application.ports import (
+    OpportunityAccessRepository,
+    OpportunityRepository,
     ProviderRepository,
     ProviderServiceRepository,
     ServiceRequestRepository,
@@ -9,6 +11,9 @@ from src.marketplace.application.ports import (
     ServiceRepository,
 )
 from src.marketplace.domain.entities import (
+    Opportunity,
+    OpportunityAccess,
+    OpportunityStatus,
     Provider,
     ProviderService,
     Service,
@@ -318,3 +323,123 @@ class CreateServiceRequest:
         )
 
         return self.service_request_repository.save(service_request)
+
+
+class CreateOpportunity:
+    def __init__(
+        self,
+        opportunity_repository: OpportunityRepository,
+        service_request_repository: ServiceRequestRepository,
+    ):
+        self.opportunity_repository = opportunity_repository
+        self.service_request_repository = service_request_repository
+
+    def execute(
+        self,
+        *,
+        service_request_id: UUID,
+        max_accesses: int = 3,
+    ) -> Opportunity:
+        if service_request_id is None:
+            raise ValueError("Opportunity service_request_id is required.")
+        if not isinstance(service_request_id, UUID):
+            raise ValueError(
+                "Opportunity service_request_id must be a valid UUID instance."
+            )
+
+        if isinstance(max_accesses, bool) or not isinstance(max_accesses, int):
+            raise ValueError("Opportunity max_accesses must be an integer.")
+        if max_accesses < 1:
+            raise ValueError("Opportunity max_accesses must be at least 1.")
+
+        service_request = self.service_request_repository.get_by_id(
+            service_request_id,
+        )
+        if service_request is None:
+            raise ValueError("ServiceRequest does not exist.")
+        if service_request.status is not ServiceRequestStatus.OPEN:
+            raise ValueError("ServiceRequest must be OPEN to create an Opportunity.")
+
+        existing = self.opportunity_repository.get_by_service_request(
+            service_request_id,
+        )
+        if existing is not None:
+            raise ValueError("Opportunity for this ServiceRequest already exists.")
+
+        now = datetime.now(timezone.utc)
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=service_request_id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=max_accesses,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.opportunity_repository.save(opportunity)
+
+
+class GrantOpportunityAccess:
+    def __init__(
+        self,
+        opportunity_repository: OpportunityRepository,
+        opportunity_access_repository: OpportunityAccessRepository,
+        provider_repository: ProviderRepository,
+    ):
+        self.opportunity_repository = opportunity_repository
+        self.opportunity_access_repository = opportunity_access_repository
+        self.provider_repository = provider_repository
+
+    def execute(
+        self,
+        *,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityAccess:
+        if opportunity_id is None:
+            raise ValueError("OpportunityAccess opportunity_id is required.")
+        if not isinstance(opportunity_id, UUID):
+            raise ValueError(
+                "OpportunityAccess opportunity_id must be a valid UUID instance."
+            )
+
+        if provider_id is None:
+            raise ValueError("OpportunityAccess provider_id is required.")
+        if not isinstance(provider_id, UUID):
+            raise ValueError(
+                "OpportunityAccess provider_id must be a valid UUID instance."
+            )
+
+        opportunity = self.opportunity_repository.get_by_id(opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        provider = self.provider_repository.get_by_id(provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+        if not provider.is_active:
+            raise ValueError("Provider is inactive.")
+
+        existing = self.opportunity_access_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+        )
+        if existing is not None:
+            raise ValueError("OpportunityAccess already exists for this provider.")
+
+        # Eligibility checks (ProviderService, matching policies) are intentionally
+        # out of scope for this sprint and will be handled by future discovery layers.
+        granted_accesses = self.opportunity_access_repository.count_by_opportunity(
+            opportunity_id,
+        )
+        if granted_accesses >= opportunity.max_accesses:
+            raise ValueError("Opportunity max_accesses limit has been reached.")
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        return self.opportunity_access_repository.save(access)

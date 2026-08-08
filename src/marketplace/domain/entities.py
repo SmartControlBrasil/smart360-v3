@@ -195,3 +195,71 @@ class ServiceRequest:
         if self.status is not ServiceRequestStatus.OPEN:
             raise ValueError("Only OPEN service requests can be closed.")
         self.status = ServiceRequestStatus.CLOSED
+
+
+class OpportunityStatus(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(slots=True)
+class Opportunity:
+    id: UUID
+    service_request_id: UUID
+    status: OpportunityStatus
+    max_accesses: int
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.service_request_id is None:
+            raise ValueError("Opportunity service_request_id is required.")
+        if not isinstance(self.service_request_id, UUID):
+            raise ValueError(
+                "Opportunity service_request_id must be a valid UUID instance."
+            )
+
+        if not isinstance(self.status, OpportunityStatus):
+            raise ValueError("Opportunity status must be an OpportunityStatus.")
+
+        if isinstance(self.max_accesses, bool) or not isinstance(
+            self.max_accesses,
+            int,
+        ):
+            raise ValueError("Opportunity max_accesses must be an integer.")
+        if self.max_accesses < 1:
+            raise ValueError("Opportunity max_accesses must be at least 1.")
+
+    def close(self) -> None:
+        if self.status is not OpportunityStatus.OPEN:
+            raise ValueError("Only OPEN opportunities can be closed.")
+        self.status = OpportunityStatus.CLOSED
+
+    def cancel(self) -> None:
+        if self.status is not OpportunityStatus.OPEN:
+            raise ValueError("Only OPEN opportunities can be cancelled.")
+        self.status = OpportunityStatus.CANCELLED
+
+
+@dataclass(slots=True)
+class OpportunityAccess:
+    id: UUID
+    opportunity_id: UUID
+    provider_id: UUID
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.opportunity_id is None:
+            raise ValueError("OpportunityAccess opportunity_id is required.")
+        if not isinstance(self.opportunity_id, UUID):
+            raise ValueError(
+                "OpportunityAccess opportunity_id must be a valid UUID instance."
+            )
+
+        if self.provider_id is None:
+            raise ValueError("OpportunityAccess provider_id is required.")
+        if not isinstance(self.provider_id, UUID):
+            raise ValueError(
+                "OpportunityAccess provider_id must be a valid UUID instance."
+            )

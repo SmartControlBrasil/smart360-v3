@@ -1,6 +1,8 @@
 from uuid import UUID
 
 from src.marketplace.application.ports import (
+    OpportunityAccessRepository,
+    OpportunityRepository,
     ProviderRepository,
     ProviderServiceRepository,
     ServiceRequestRepository,
@@ -8,6 +10,9 @@ from src.marketplace.application.ports import (
     ServiceRepository,
 )
 from src.marketplace.domain.entities import (
+    Opportunity,
+    OpportunityAccess,
+    OpportunityStatus,
     Provider,
     ProviderService,
     Service,
@@ -16,6 +21,8 @@ from src.marketplace.domain.entities import (
     ServiceRequestStatus,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
+    OpportunityAccessModel,
+    OpportunityModel,
     ProviderModel,
     ProviderServiceModel,
     ServiceModel,
@@ -340,3 +347,118 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
             status=ServiceRequestModel.Status.OPEN,
         ).order_by("created_at", "id")
         return [self._to_entity(model) for model in models]
+
+
+class DjangoOpportunityRepository(OpportunityRepository):
+    @staticmethod
+    def _to_entity(model: OpportunityModel) -> Opportunity:
+        return Opportunity(
+            id=model.id,
+            service_request_id=model.service_request_id,
+            status=OpportunityStatus(model.status),
+            max_accesses=model.max_accesses,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    def save(self, opportunity: Opportunity) -> Opportunity:
+        model, _ = OpportunityModel.objects.update_or_create(
+            id=opportunity.id,
+            defaults={
+                "service_request_id": opportunity.service_request_id,
+                "status": opportunity.status.value,
+                "max_accesses": opportunity.max_accesses,
+                "created_at": opportunity.created_at,
+                "updated_at": opportunity.updated_at,
+            },
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, opportunity_id: UUID) -> Opportunity | None:
+        try:
+            model = OpportunityModel.objects.get(id=opportunity_id)
+        except OpportunityModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def get_by_service_request(
+        self,
+        service_request_id: UUID,
+    ) -> Opportunity | None:
+        try:
+            model = OpportunityModel.objects.get(service_request_id=service_request_id)
+        except OpportunityModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def list_open(self) -> list[Opportunity]:
+        models = OpportunityModel.objects.filter(
+            status=OpportunityModel.Status.OPEN,
+        ).order_by("created_at", "id")
+        return [self._to_entity(model) for model in models]
+
+
+class DjangoOpportunityAccessRepository(OpportunityAccessRepository):
+    @staticmethod
+    def _to_entity(model: OpportunityAccessModel) -> OpportunityAccess:
+        return OpportunityAccess(
+            id=model.id,
+            opportunity_id=model.opportunity_id,
+            provider_id=model.provider_id,
+            created_at=model.created_at,
+        )
+
+    def save(self, access: OpportunityAccess) -> OpportunityAccess:
+        model, _ = OpportunityAccessModel.objects.update_or_create(
+            id=access.id,
+            defaults={
+                "opportunity_id": access.opportunity_id,
+                "provider_id": access.provider_id,
+                "created_at": access.created_at,
+            },
+        )
+        return self._to_entity(model)
+
+    def get_by_id(self, access_id: UUID) -> OpportunityAccess | None:
+        try:
+            model = OpportunityAccessModel.objects.get(id=access_id)
+        except OpportunityAccessModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def get_by_opportunity_and_provider(
+        self,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> OpportunityAccess | None:
+        try:
+            model = OpportunityAccessModel.objects.get(
+                opportunity_id=opportunity_id,
+                provider_id=provider_id,
+            )
+        except OpportunityAccessModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+    def list_by_opportunity(
+        self,
+        opportunity_id: UUID,
+    ) -> list[OpportunityAccess]:
+        models = OpportunityAccessModel.objects.filter(
+            opportunity_id=opportunity_id,
+        ).order_by("created_at", "id")
+        return [self._to_entity(model) for model in models]
+
+    def list_by_provider(
+        self,
+        provider_id: UUID,
+    ) -> list[OpportunityAccess]:
+        models = OpportunityAccessModel.objects.filter(
+            provider_id=provider_id,
+        ).order_by("created_at", "id")
+        return [self._to_entity(model) for model in models]
+
+    def count_by_opportunity(self, opportunity_id: UUID) -> int:
+        return OpportunityAccessModel.objects.filter(
+            opportunity_id=opportunity_id,
+        ).count()

@@ -4,6 +4,9 @@ from uuid import uuid4
 from django.test import SimpleTestCase
 
 from src.marketplace.domain.entities import (
+    Opportunity,
+    OpportunityAccess,
+    OpportunityStatus,
     Provider,
     ProviderService,
     Service,
@@ -477,3 +480,179 @@ class ServiceRequestDomainTests(SimpleTestCase):
 
         with self.assertRaises(ValueError):
             service_request.close()
+
+
+class OpportunityDomainTests(SimpleTestCase):
+    def test_valid_creation(self):
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.assertEqual(opportunity.status, OpportunityStatus.OPEN)
+        self.assertEqual(opportunity.max_accesses, 3)
+
+    def test_service_request_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Opportunity(
+                id=uuid4(),
+                service_request_id=None,
+                status=OpportunityStatus.OPEN,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_service_request_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Opportunity(
+                id=uuid4(),
+                service_request_id="invalid-uuid",
+                status=OpportunityStatus.OPEN,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_status_invalid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Opportunity(
+                id=uuid4(),
+                service_request_id=uuid4(),
+                status="open",
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_max_accesses_less_than_one_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Opportunity(
+                id=uuid4(),
+                service_request_id=uuid4(),
+                status=OpportunityStatus.OPEN,
+                max_accesses=0,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_max_accesses_non_int_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Opportunity(
+                id=uuid4(),
+                service_request_id=uuid4(),
+                status=OpportunityStatus.OPEN,
+                max_accesses="3",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_max_accesses_bool_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Opportunity(
+                id=uuid4(),
+                service_request_id=uuid4(),
+                status=OpportunityStatus.OPEN,
+                max_accesses=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_close_open_to_closed(self):
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        opportunity.close()
+        self.assertEqual(opportunity.status, OpportunityStatus.CLOSED)
+
+    def test_close_non_open_is_rejected(self):
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.CANCELLED,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            opportunity.close()
+
+    def test_cancel_open_to_cancelled(self):
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        opportunity.cancel()
+        self.assertEqual(opportunity.status, OpportunityStatus.CANCELLED)
+
+    def test_cancel_non_open_is_rejected(self):
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.CLOSED,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            opportunity.cancel()
+
+
+class OpportunityAccessDomainTests(SimpleTestCase):
+    def test_valid_creation(self):
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.assertIsNotNone(access.id)
+
+    def test_opportunity_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=None,
+                provider_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_opportunity_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id="invalid-uuid",
+                provider_id=uuid4(),
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_provider_id_none_is_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=uuid4(),
+                provider_id=None,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_provider_id_non_uuid_is_rejected(self):
+        with self.assertRaises(ValueError):
+            OpportunityAccess(
+                id=uuid4(),
+                opportunity_id=uuid4(),
+                provider_id="invalid-uuid",
+                created_at=datetime.now(timezone.utc),
+            )

@@ -178,3 +178,66 @@ class ServiceRequestModel(models.Model):
                 name="mkt_sr_srv_status_idx",
             ),
         ]
+
+
+class OpportunityModel(models.Model):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        CLOSED = "closed", "Closed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    service_request = models.OneToOneField(
+        ServiceRequestModel,
+        on_delete=models.PROTECT,
+        related_name="opportunity",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.OPEN,
+    )
+    max_accesses = models.PositiveIntegerField()
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_opportunities"
+        indexes = [
+            models.Index(
+                fields=["status", "created_at"],
+                name="mkt_opp_st_cr_idx",
+            ),
+        ]
+
+
+class OpportunityAccessModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    opportunity = models.ForeignKey(
+        OpportunityModel,
+        on_delete=models.PROTECT,
+        related_name="accesses",
+    )
+    provider = models.ForeignKey(
+        ProviderModel,
+        on_delete=models.PROTECT,
+        related_name="opportunity_accesses",
+    )
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_opportunity_accesses"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["opportunity", "provider"],
+                name="mkt_opp_acc_uniq",
+            ),
+        ]

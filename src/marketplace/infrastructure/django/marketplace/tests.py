@@ -6,6 +6,9 @@ from django.db.models import ProtectedError
 from django.test import TestCase
 
 from src.marketplace.domain.entities import (
+    Opportunity,
+    OpportunityAccess,
+    OpportunityStatus,
     Provider,
     ProviderService,
     Service,
@@ -14,6 +17,8 @@ from src.marketplace.domain.entities import (
     ServiceRequestStatus,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
+    OpportunityAccessModel,
+    OpportunityModel,
     ProviderModel,
     ProviderServiceModel,
     ServiceModel,
@@ -21,6 +26,8 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceRequestModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
+    DjangoOpportunityAccessRepository,
+    DjangoOpportunityRepository,
     DjangoProviderRepository,
     DjangoProviderServiceRepository,
     DjangoServiceRequestRepository,
@@ -1091,3 +1098,499 @@ class DjangoServiceRequestRepositoryTests(TestCase):
 
         with self.assertRaises(ProtectedError):
             ServiceModel.objects.get(id=self.service_a.id).delete()
+
+
+class DjangoOpportunityRepositoryTests(TestCase):
+    def setUp(self):
+        self.opportunity_repository = DjangoOpportunityRepository()
+        self.service_request_repository = DjangoServiceRequestRepository()
+        self.service_category_repository = DjangoServiceCategoryRepository()
+        self.service_repository = DjangoServiceRepository()
+
+        self.organization = OrganizationModel.objects.create(
+            name="Org Opportunity",
+            slug="org-opportunity",
+        )
+        now = datetime.now(timezone.utc)
+        self.category = self.service_category_repository.save(
+            ServiceCategory(
+                id=uuid4(),
+                name="Categoria OPP",
+                slug="categoria-opp",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service = self.service_repository.save(
+            Service(
+                id=uuid4(),
+                category_id=self.category.id,
+                name="Servico OPP",
+                slug="servico-opp",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_request_a = self.service_request_repository.save(
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                service_id=self.service.id,
+                title="Request A",
+                description="desc",
+                status=ServiceRequestStatus.OPEN,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_request_b = self.service_request_repository.save(
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                service_id=self.service.id,
+                title="Request B",
+                description="desc",
+                status=ServiceRequestStatus.OPEN,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    def _build_opportunity(
+        self,
+        *,
+        service_request_id,
+        status: OpportunityStatus = OpportunityStatus.OPEN,
+        max_accesses: int = 3,
+    ) -> Opportunity:
+        now = datetime.now(timezone.utc)
+        return Opportunity(
+            id=uuid4(),
+            service_request_id=service_request_id,
+            status=status,
+            max_accesses=max_accesses,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_save(self):
+        opportunity = self._build_opportunity(
+            service_request_id=self.service_request_a.id,
+        )
+        saved = self.opportunity_repository.save(opportunity)
+        self.assertEqual(saved.id, opportunity.id)
+        self.assertTrue(
+            OpportunityModel.objects.filter(id=opportunity.id).exists()
+        )
+
+    def test_get_by_id(self):
+        opportunity = self.opportunity_repository.save(
+            self._build_opportunity(service_request_id=self.service_request_a.id)
+        )
+        found = self.opportunity_repository.get_by_id(opportunity.id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, opportunity.id)
+
+    def test_get_by_id_returns_none_when_missing(self):
+        self.assertIsNone(self.opportunity_repository.get_by_id(uuid4()))
+
+    def test_get_by_service_request(self):
+        opportunity = self.opportunity_repository.save(
+            self._build_opportunity(service_request_id=self.service_request_a.id)
+        )
+        found = self.opportunity_repository.get_by_service_request(
+            self.service_request_a.id,
+        )
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, opportunity.id)
+
+    def test_service_request_uniqueness(self):
+        self.opportunity_repository.save(
+            self._build_opportunity(service_request_id=self.service_request_a.id)
+        )
+        with self.assertRaises(IntegrityError):
+            self.opportunity_repository.save(
+                self._build_opportunity(service_request_id=self.service_request_a.id)
+            )
+
+    def test_list_open(self):
+        self.opportunity_repository.save(
+            self._build_opportunity(
+                service_request_id=self.service_request_a.id,
+                status=OpportunityStatus.OPEN,
+            )
+        )
+        self.opportunity_repository.save(
+            self._build_opportunity(
+                service_request_id=self.service_request_b.id,
+                status=OpportunityStatus.CLOSED,
+            )
+        )
+        service_request_c = self.service_request_repository.save(
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                service_id=self.service.id,
+                title="Request C",
+                description="desc",
+                status=ServiceRequestStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        self.opportunity_repository.save(
+            self._build_opportunity(
+                service_request_id=service_request_c.id,
+                status=OpportunityStatus.CANCELLED,
+            )
+        )
+
+        results = self.opportunity_repository.list_open()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, OpportunityStatus.OPEN)
+
+    def test_list_open_is_deterministic(self):
+        first = Opportunity(
+            id=uuid4(),
+            service_request_id=self.service_request_a.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        second = Opportunity(
+            id=uuid4(),
+            service_request_id=self.service_request_b.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        self.opportunity_repository.save(second)
+        self.opportunity_repository.save(first)
+
+        results = self.opportunity_repository.list_open()
+        self.assertEqual(results[0].id, first.id)
+        self.assertEqual(results[1].id, second.id)
+
+    def test_protect_prevents_service_request_delete_when_linked(self):
+        self.opportunity_repository.save(
+            self._build_opportunity(service_request_id=self.service_request_a.id)
+        )
+        with self.assertRaises(ProtectedError):
+            ServiceRequestModel.objects.get(id=self.service_request_a.id).delete()
+
+
+class DjangoOpportunityAccessRepositoryTests(TestCase):
+    def setUp(self):
+        self.access_repository = DjangoOpportunityAccessRepository()
+        self.opportunity_repository = DjangoOpportunityRepository()
+        self.provider_repository = DjangoProviderRepository()
+        self.service_request_repository = DjangoServiceRequestRepository()
+        self.service_category_repository = DjangoServiceCategoryRepository()
+        self.service_repository = DjangoServiceRepository()
+
+        self.organization = OrganizationModel.objects.create(
+            name="Org Access",
+            slug="org-access",
+        )
+        self.provider_a = self.provider_repository.save(
+            Provider(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                display_name="Provider A",
+                slug="opp-access-provider-a",
+                description="desc",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        self.provider_b = self.provider_repository.save(
+            Provider(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                display_name="Provider B",
+                slug="opp-access-provider-b",
+                description="desc",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        now = datetime.now(timezone.utc)
+        category = self.service_category_repository.save(
+            ServiceCategory(
+                id=uuid4(),
+                name="Cat Access",
+                slug="cat-access",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        service = self.service_repository.save(
+            Service(
+                id=uuid4(),
+                category_id=category.id,
+                name="Servico Access",
+                slug="servico-access",
+                description="desc",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_request_a = self.service_request_repository.save(
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                service_id=service.id,
+                title="Req Access A",
+                description="desc",
+                status=ServiceRequestStatus.OPEN,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.service_request_b = self.service_request_repository.save(
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                service_id=service.id,
+                title="Req Access B",
+                description="desc",
+                status=ServiceRequestStatus.OPEN,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.opportunity_a = self.opportunity_repository.save(
+            Opportunity(
+                id=uuid4(),
+                service_request_id=self.service_request_a.id,
+                status=OpportunityStatus.OPEN,
+                max_accesses=3,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.opportunity_b = self.opportunity_repository.save(
+            Opportunity(
+                id=uuid4(),
+                service_request_id=self.service_request_b.id,
+                status=OpportunityStatus.OPEN,
+                max_accesses=3,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    def _build_access(
+        self,
+        *,
+        opportunity_id,
+        provider_id,
+        created_at: datetime | None = None,
+    ) -> OpportunityAccess:
+        return OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+            created_at=created_at or datetime.now(timezone.utc),
+        )
+
+    def test_save(self):
+        access = self._build_access(
+            opportunity_id=self.opportunity_a.id,
+            provider_id=self.provider_a.id,
+        )
+        saved = self.access_repository.save(access)
+        self.assertEqual(saved.id, access.id)
+        self.assertTrue(
+            OpportunityAccessModel.objects.filter(id=access.id).exists()
+        )
+
+    def test_get_by_id(self):
+        access = self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        found = self.access_repository.get_by_id(access.id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, access.id)
+
+    def test_get_by_id_returns_none_when_missing(self):
+        self.assertIsNone(self.access_repository.get_by_id(uuid4()))
+
+    def test_get_by_opportunity_and_provider(self):
+        access = self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        found = self.access_repository.get_by_opportunity_and_provider(
+            opportunity_id=self.opportunity_a.id,
+            provider_id=self.provider_a.id,
+        )
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, access.id)
+
+    def test_uniqueness_opportunity_provider(self):
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        with self.assertRaises(IntegrityError):
+            self.access_repository.save(
+                self._build_access(
+                    opportunity_id=self.opportunity_a.id,
+                    provider_id=self.provider_a.id,
+                )
+            )
+
+    def test_list_by_opportunity(self):
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_b.id,
+            )
+        )
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_b.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        results = self.access_repository.list_by_opportunity(self.opportunity_a.id)
+        self.assertEqual(len(results), 2)
+
+    def test_list_by_provider(self):
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_b.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_b.id,
+                provider_id=self.provider_b.id,
+            )
+        )
+        results = self.access_repository.list_by_provider(self.provider_a.id)
+        self.assertEqual(len(results), 2)
+
+    def test_count_by_opportunity(self):
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_b.id,
+            )
+        )
+        self.assertEqual(
+            self.access_repository.count_by_opportunity(self.opportunity_a.id),
+            2,
+        )
+
+    def test_listings_are_deterministic(self):
+        first = self._build_access(
+            opportunity_id=self.opportunity_a.id,
+            provider_id=self.provider_a.id,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        second = self._build_access(
+            opportunity_id=self.opportunity_a.id,
+            provider_id=self.provider_b.id,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        self.access_repository.save(second)
+        self.access_repository.save(first)
+
+        by_opportunity = self.access_repository.list_by_opportunity(
+            self.opportunity_a.id,
+        )
+        by_provider = self.access_repository.list_by_provider(self.provider_a.id)
+        self.assertEqual(by_opportunity[0].id, first.id)
+        self.assertEqual(by_opportunity[1].id, second.id)
+        self.assertEqual(by_provider[0].id, first.id)
+
+    def test_different_providers_can_access_same_opportunity(self):
+        first = self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        second = self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_b.id,
+            )
+        )
+        self.assertEqual(first.opportunity_id, second.opportunity_id)
+        self.assertNotEqual(first.provider_id, second.provider_id)
+
+    def test_same_provider_can_access_different_opportunities(self):
+        first = self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        second = self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_b.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        self.assertEqual(first.provider_id, second.provider_id)
+        self.assertNotEqual(first.opportunity_id, second.opportunity_id)
+
+    def test_protect_prevents_opportunity_delete_when_linked(self):
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        with self.assertRaises(ProtectedError):
+            OpportunityModel.objects.get(id=self.opportunity_a.id).delete()
+
+    def test_protect_prevents_provider_delete_when_linked(self):
+        self.access_repository.save(
+            self._build_access(
+                opportunity_id=self.opportunity_a.id,
+                provider_id=self.provider_a.id,
+            )
+        )
+        with self.assertRaises(ProtectedError):
+            ProviderModel.objects.get(id=self.provider_a.id).delete()
