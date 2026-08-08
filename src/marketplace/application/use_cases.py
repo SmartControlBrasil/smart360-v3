@@ -806,6 +806,30 @@ class RequestOpportunityAccess:
         return RequestOpportunityAccessResult(decision=decision, access=access)
 
 
+class SettlementAwareAccessEntitlementPolicy(AccessEntitlementPolicy):
+    def __init__(self, economic_settlement_repository: EconomicSettlementRepository):
+        self.economic_settlement_repository = economic_settlement_repository
+
+    def decide(
+        self,
+        *,
+        interest: OpportunityInterest,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> AccessEntitlementDecision:
+        settlement = self.economic_settlement_repository.get_by_interest(interest.id)
+        if settlement is not None:
+            return AccessEntitlementDecision(
+                allowed=True,
+                reason="economic_settlement_exists",
+            )
+        return AccessEntitlementDecision(
+            allowed=False,
+            reason="economic_settlement_required",
+        )
+
+
 class QuoteOpportunityAccessPrice:
     def __init__(
         self,
