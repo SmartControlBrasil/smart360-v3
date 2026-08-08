@@ -540,3 +540,70 @@ class RankCandidates:
                 str(res.provider.id),
             ),
         )
+
+
+class DistributeOpportunity:
+    def __init__(
+        self,
+        opportunity_repository: OpportunityRepository,
+        service_request_repository: ServiceRequestRepository,
+        opportunity_access_repository: OpportunityAccessRepository,
+        rank_candidates: RankCandidates,
+        grant_opportunity_access: GrantOpportunityAccess,
+    ):
+        self.opportunity_repository = opportunity_repository
+        self.service_request_repository = service_request_repository
+        self.opportunity_access_repository = opportunity_access_repository
+        self.rank_candidates = rank_candidates
+        self.grant_opportunity_access = grant_opportunity_access
+
+    def execute(
+        self,
+        *,
+        opportunity_id: UUID,
+    ) -> list[OpportunityAccess]:
+        if opportunity_id is None:
+            raise ValueError("Opportunity id is required.")
+        if not isinstance(opportunity_id, UUID):
+            raise ValueError("Opportunity id must be a valid UUID instance.")
+
+        opportunity = self.opportunity_repository.get_by_id(opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+        if opportunity.status is not OpportunityStatus.OPEN:
+            raise ValueError("Opportunity is not OPEN.")
+
+        service_request = self.service_request_repository.get_by_id(opportunity.service_request_id)
+        if service_request is None:
+            raise ValueError("ServiceRequest does not exist.")
+
+        # Rank candidates (this will also validate service request status/existence)
+        ranked_results = self.rank_candidates.execute(service_request_id=service_request.id)
+
+        # Get existing accesses
+        existing_accesses = self.opportunity_access_repository.list_by_opportunity(opportunity.id)
+        existing_provider_ids = {access.provider_id for access in existing_accesses}
+
+        remaining_capacity = opportunity.max_accesses - len(existing_accesses)
+        if remaining_capacity <= 0:
+            return []
+
+        # Filter out providers who already have access
+        candidates_to_grant = [
+            result.provider
+            for result in ranked_results
+            if result.provider.id not in existing_provider_ids
+        ]
+
+        # Take up to remaining_capacity
+        selected_providers = candidates_to_grant[:remaining_capacity]
+
+        granted_accesses: list[OpportunityAccess] = []
+        for provider in selected_providers:
+            access = self.grant_opportunity_access.execute(
+                opportunity_id=opportunity.id,
+                provider_id=provider.id,
+            )
+            granted_accesses.append(access)
+
+        return granted_accesses
