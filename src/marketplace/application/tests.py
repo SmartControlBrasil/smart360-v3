@@ -26,6 +26,7 @@ from src.marketplace.application.use_cases import (
     SettleOpportunityWithCredits,
     SettlementAwareAccessEntitlementPolicy,
     RankCandidates,
+    GetProtectedCommercialData,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -50,6 +51,7 @@ from src.marketplace.domain.entities import (
     CreditLedgerDirection,
     CreditLedgerEntry,
     CreditSettlementResult,
+    ProtectedCommercialData,
 )
 from src.marketplace.application.ports import (
     CreditCostPolicy,
@@ -1419,6 +1421,8 @@ class CreateServiceRequestTests(SimpleTestCase):
             service_id=service.id,
             title="  Falha em CLP  ",
             description="  Linha parada  ",
+            requester_name="John Doe",
+            requester_email="john@example.com",
         )
 
         self.assertIsInstance(created.id, UUID)
@@ -6359,3 +6363,315 @@ class RequestOpportunityAccessIntegrationTests(SimpleTestCase):
         self.assertEqual(self.settlement_repo.save_calls, settlement_save_calls_before)
         self.assertEqual(wallet_repo.save_calls, wallet_save_calls_before)
         self.assertEqual(ledger_repo.save_calls, ledger_save_calls_before)
+
+
+class GetProtectedCommercialDataTests(SimpleTestCase):
+    def setUp(self):
+        self.access_repo = InMemoryOpportunityAccessRepository()
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.use_case = GetProtectedCommercialData(
+            opportunity_access_repository=self.access_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+        )
+
+    def test_get_protected_commercial_data_success(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        result = self.use_case.execute(opportunity_access_id=access.id)
+
+        self.assertIsInstance(result, ProtectedCommercialData)
+        self.assertEqual(result.requester_name, "John Doe")
+        self.assertEqual(result.requester_email, "john@example.com")
+        self.assertEqual(result.requester_phone, "+5511999999999")
+
+    def test_nonexistent_access_rejected(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_access_id=uuid4())
+
+    def test_malformed_uuid_rejected(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_access_id="invalid-uuid")  # type: ignore
+
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_access_id=None)  # type: ignore
+
+    def test_missing_opportunity_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_access_id=access.id)
+
+    def test_missing_service_request_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_access_id=access.id)
+
+    def test_missing_provider_rejected(self):
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=uuid4(),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_access_id=access.id)
+
+    def test_get_protected_commercial_data_legacy_fails(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="",
+            requester_email="",
+            requester_phone="",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_access_id=access.id)
+        self.assertIn("No protected contact information available for this legacy request", str(ctx.exception))
+
+    def test_create_service_request_validation_rules(self):
+        # We need mock repositories for CreateServiceRequest
+        from src.marketplace.application.use_cases import CreateServiceRequest
+
+        org_repo = InMemoryOrganizationRepository()
+        srv_repo = InMemoryServiceRepository()
+
+        org = Organization(
+            id=uuid4(),
+            name="Org",
+            slug="org",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        org_repo.save(org)
+
+        srv = Service(
+            id=uuid4(),
+            category_id=uuid4(),
+            name="Srv",
+            slug="srv",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        srv_repo.save(srv)
+
+        create_use_case = CreateServiceRequest(
+            service_request_repository=self.sr_repo,
+            organization_repository=org_repo,
+            service_repository=srv_repo,
+        )
+
+        # 1. Reject blank requester_name
+        with self.assertRaises(ValueError) as ctx:
+            create_use_case.execute(
+                organization_id=org.id,
+                service_id=srv.id,
+                title="Title",
+                requester_name="   ",
+                requester_email="john@example.com",
+                requester_phone="",
+            )
+        self.assertIn("requester_name cannot be empty", str(ctx.exception))
+
+        # 2. Reject new request with neither email nor phone
+        with self.assertRaises(ValueError) as ctx:
+            create_use_case.execute(
+                organization_id=org.id,
+                service_id=srv.id,
+                title="Title",
+                requester_name="John Doe",
+                requester_email="   ",
+                requester_phone="  ",
+            )
+        self.assertIn("At least one contact channel", str(ctx.exception))
+
+        # 3. New request with name + email succeeds
+        sr1 = create_use_case.execute(
+            organization_id=org.id,
+            service_id=srv.id,
+            title="Title",
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="",
+        )
+        self.assertEqual(sr1.requester_name, "John Doe")
+        self.assertEqual(sr1.requester_email, "john@example.com")
+        self.assertEqual(sr1.requester_phone, "")
+
+        # 4. New request with name + phone succeeds
+        sr2 = create_use_case.execute(
+            organization_id=org.id,
+            service_id=srv.id,
+            title="Title",
+            requester_name="John Doe",
+            requester_email="",
+            requester_phone="+5511999999999",
+        )
+        self.assertEqual(sr2.requester_name, "John Doe")
+        self.assertEqual(sr2.requester_email, "")
+        self.assertEqual(sr2.requester_phone, "+5511999999999")

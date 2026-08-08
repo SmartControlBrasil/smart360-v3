@@ -27,6 +27,7 @@ from src.marketplace.domain.entities import (
     CreditLedgerDirection,
     CreditLedgerEntry,
     CreditSettlementResult,
+    ProtectedCommercialData,
 )
 
 
@@ -494,6 +495,99 @@ class ServiceRequestDomainTests(SimpleTestCase):
 
         with self.assertRaises(ValueError):
             service_request.close()
+
+    def test_protected_commercial_data_valid_combinations(self):
+        # 1. Valid name + email
+        data = ProtectedCommercialData(
+            requester_name="  Marcelo Silva  ",
+            requester_email="  marcelo@example.com  ",
+            requester_phone=""
+        )
+        self.assertEqual(data.requester_name, "Marcelo Silva")
+        self.assertEqual(data.requester_email, "marcelo@example.com")
+        self.assertEqual(data.requester_phone, "")
+
+        # 2. Valid name + phone
+        data2 = ProtectedCommercialData(
+            requester_name="Marcelo",
+            requester_email="",
+            requester_phone="  +55 11 99999-9999  "
+        )
+        self.assertEqual(data2.requester_name, "Marcelo")
+        self.assertEqual(data2.requester_email, "")
+        self.assertEqual(data2.requester_phone, "+55 11 99999-9999")
+
+        # 3. Valid name + email + phone
+        data3 = ProtectedCommercialData(
+            requester_name="Marcelo",
+            requester_email="marcelo@example.com",
+            requester_phone="12345"
+        )
+        self.assertEqual(data3.requester_name, "Marcelo")
+        self.assertEqual(data3.requester_email, "marcelo@example.com")
+        self.assertEqual(data3.requester_phone, "12345")
+
+    def test_protected_commercial_data_invalid(self):
+        # Blank name rejected
+        with self.assertRaises(ValueError):
+            ProtectedCommercialData(
+                requester_name="   ",
+                requester_email="test@example.com",
+                requester_phone=""
+            )
+
+        # No contact channels (both email and phone blank) rejected
+        with self.assertRaises(ValueError):
+            ProtectedCommercialData(
+                requester_name="Marcelo",
+                requester_email="  ",
+                requester_phone=" "
+            )
+
+    def test_protected_commercial_data_immutability(self):
+        data = ProtectedCommercialData(
+            requester_name="Marcelo",
+            requester_email="marcelo@example.com",
+            requester_phone=""
+        )
+        with self.assertRaises(FrozenInstanceError):
+            data.requester_name = "New Name"  # type: ignore
+
+    def test_service_request_valid_with_contact_data(self):
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="  Some Requester  ",
+            requester_email="  req@example.com  ",
+            requester_phone="  9999-8888  "
+        )
+        self.assertEqual(sr.requester_name, "Some Requester")
+        self.assertEqual(sr.requester_email, "req@example.com")
+        self.assertEqual(sr.requester_phone, "9999-8888")
+
+    def test_service_request_allows_empty_legacy_contact_data(self):
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="",
+            requester_email="",
+            requester_phone=""
+        )
+        self.assertEqual(sr.requester_name, "")
+        self.assertEqual(sr.requester_email, "")
+        self.assertEqual(sr.requester_phone, "")
 
 
 class OpportunityDomainTests(SimpleTestCase):

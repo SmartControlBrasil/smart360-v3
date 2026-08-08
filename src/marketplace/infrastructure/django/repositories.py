@@ -318,6 +318,9 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
             status=ServiceRequestStatus(model.status),
             created_at=model.created_at,
             updated_at=model.updated_at,
+            requester_name=model.requester_name,
+            requester_email=model.requester_email,
+            requester_phone=model.requester_phone,
         )
 
     def save(self, service_request: ServiceRequest) -> ServiceRequest:
@@ -329,6 +332,9 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
                 "title": service_request.title,
                 "description": service_request.description,
                 "status": service_request.status.value,
+                "requester_name": service_request.requester_name,
+                "requester_email": service_request.requester_email,
+                "requester_phone": service_request.requester_phone,
                 "created_at": service_request.created_at,
                 "updated_at": service_request.updated_at,
             },

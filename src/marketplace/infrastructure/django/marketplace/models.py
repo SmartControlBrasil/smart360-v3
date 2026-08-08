@@ -163,6 +163,20 @@ class ServiceRequestModel(models.Model):
         choices=Status.choices,
         default=Status.OPEN,
     )
+    requester_name = models.CharField(
+        max_length=255,
+        default="",
+        blank=True,
+    )
+    requester_email = models.EmailField(
+        default="",
+        blank=True,
+    )
+    requester_phone = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+    )
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
 

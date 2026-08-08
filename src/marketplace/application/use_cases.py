@@ -43,6 +43,7 @@ from src.marketplace.domain.entities import (
     CreditLedgerDirection,
     CreditLedgerEntry,
     CreditSettlementResult,
+    ProtectedCommercialData,
 )
 from src.organizations.application.ports import OrganizationRepository
 
@@ -301,6 +302,9 @@ class CreateServiceRequest:
         service_id: UUID,
         title: str,
         description: str = "",
+        requester_name: str = "",
+        requester_email: str = "",
+        requester_phone: str = "",
     ) -> ServiceRequest:
         if organization_id is None:
             raise ValueError("ServiceRequest organization_id is required.")
@@ -333,6 +337,15 @@ class CreateServiceRequest:
             raise ValueError("ServiceRequest title cannot be empty.")
         normalized_description = description.strip()
 
+        normalized_req_name = requester_name.strip()
+        if not normalized_req_name:
+            raise ValueError("requester_name cannot be empty for new requests.")
+
+        normalized_req_email = requester_email.strip()
+        normalized_req_phone = requester_phone.strip()
+        if not normalized_req_email and not normalized_req_phone:
+            raise ValueError("At least one contact channel (email or phone) must be provided for new requests.")
+
         now = datetime.now(timezone.utc)
         service_request = ServiceRequest(
             id=uuid4(),
@@ -341,6 +354,9 @@ class CreateServiceRequest:
             title=normalized_title,
             description=normalized_description,
             status=ServiceRequestStatus.OPEN,
+            requester_name=normalized_req_name,
+            requester_email=normalized_req_email,
+            requester_phone=normalized_req_phone,
             created_at=now,
             updated_at=now,
         )
@@ -1256,4 +1272,54 @@ class SettleOpportunityWithCredits:
             credit_units=required_units,
             debit_entry=debit_entry,
             settlement=settlement,
+        )
+
+
+class GetProtectedCommercialData:
+    def __init__(
+        self,
+        opportunity_access_repository: OpportunityAccessRepository,
+        opportunity_repository: OpportunityRepository,
+        service_request_repository: ServiceRequestRepository,
+        provider_repository: ProviderRepository,
+    ):
+        self.opportunity_access_repository = opportunity_access_repository
+        self.opportunity_repository = opportunity_repository
+        self.service_request_repository = service_request_repository
+        self.provider_repository = provider_repository
+
+    def execute(
+        self,
+        *,
+        opportunity_access_id: UUID,
+    ) -> ProtectedCommercialData:
+        if opportunity_access_id is None or not isinstance(opportunity_access_id, UUID):
+            raise ValueError("OpportunityAccess id is required and must be a UUID instance.")
+
+        access = self.opportunity_access_repository.get_by_id(opportunity_access_id)
+        if access is None:
+            raise ValueError("OpportunityAccess does not exist.")
+
+        opportunity = self.opportunity_repository.get_by_id(access.opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+
+        service_request = self.service_request_repository.get_by_id(opportunity.service_request_id)
+        if service_request is None:
+            raise ValueError("ServiceRequest does not exist.")
+
+        provider = self.provider_repository.get_by_id(access.provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+
+        req_name = service_request.requester_name.strip()
+        req_email = service_request.requester_email.strip()
+        req_phone = service_request.requester_phone.strip()
+        if not req_name or (not req_email and not req_phone):
+            raise ValueError("No protected contact information available for this legacy request.")
+
+        return ProtectedCommercialData(
+            requester_name=req_name,
+            requester_email=req_email,
+            requester_phone=req_phone,
         )

@@ -160,6 +160,9 @@ class ServiceRequest:
     status: ServiceRequestStatus
     created_at: datetime
     updated_at: datetime
+    requester_name: str = ""
+    requester_email: str = ""
+    requester_phone: str = ""
 
     def __post_init__(self) -> None:
         if self.organization_id is None:
@@ -183,8 +186,18 @@ class ServiceRequest:
         if not isinstance(self.status, ServiceRequestStatus):
             raise ValueError("ServiceRequest status must be a ServiceRequestStatus.")
 
+        if self.requester_name is None or not isinstance(self.requester_name, str):
+            raise ValueError("ServiceRequest requester_name must be a string.")
+        if self.requester_email is None or not isinstance(self.requester_email, str):
+            raise ValueError("ServiceRequest requester_email must be a string.")
+        if self.requester_phone is None or not isinstance(self.requester_phone, str):
+            raise ValueError("ServiceRequest requester_phone must be a string.")
+
         self.title = normalized_title
         self.description = self.description.strip()
+        self.requester_name = self.requester_name.strip()
+        self.requester_email = self.requester_email.strip()
+        self.requester_phone = self.requester_phone.strip()
 
     def cancel(self) -> None:
         if self.status is not ServiceRequestStatus.OPEN:
@@ -195,6 +208,36 @@ class ServiceRequest:
         if self.status is not ServiceRequestStatus.OPEN:
             raise ValueError("Only OPEN service requests can be closed.")
         self.status = ServiceRequestStatus.CLOSED
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedCommercialData:
+    requester_name: str
+    requester_email: str
+    requester_phone: str
+
+    def __post_init__(self) -> None:
+        if self.requester_name is None or not isinstance(self.requester_name, str):
+            raise ValueError("requester_name must be a string.")
+        if self.requester_email is None or not isinstance(self.requester_email, str):
+            raise ValueError("requester_email must be a string.")
+        if self.requester_phone is None or not isinstance(self.requester_phone, str):
+            raise ValueError("requester_phone must be a string.")
+
+        normalized_name = self.requester_name.strip()
+        normalized_email = self.requester_email.strip()
+        normalized_phone = self.requester_phone.strip()
+
+        if not normalized_name:
+            raise ValueError("requester_name cannot be empty.")
+
+        if not normalized_email and not normalized_phone:
+            raise ValueError("At least one usable contact channel must exist: email OR phone.")
+
+        object.__setattr__(self, "requester_name", normalized_name)
+        object.__setattr__(self, "requester_email", normalized_email)
+        object.__setattr__(self, "requester_phone", normalized_phone)
+
 
 
 class OpportunityStatus(StrEnum):

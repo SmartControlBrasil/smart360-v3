@@ -971,6 +971,47 @@ class DjangoServiceRequestRepositoryTests(TestCase):
     def test_get_by_id_returns_none_when_missing(self):
         self.assertIsNone(self.repository.get_by_id(uuid4()))
 
+    def test_save_retrieves_requester_contact_data(self):
+        now = datetime.now(timezone.utc)
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=self.organization_a.id,
+            service_id=self.service_a.id,
+            title="Solicitacao",
+            description="Descricao",
+            status=ServiceRequestStatus.OPEN,
+            created_at=now,
+            updated_at=now,
+            requester_name="Custom Requester",
+            requester_email="custom@example.com",
+            requester_phone="+5511988887777",
+        )
+        self.repository.save(sr)
+
+        found = self.repository.get_by_id(sr.id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.requester_name, "Custom Requester")
+        self.assertEqual(found.requester_email, "custom@example.com")
+        self.assertEqual(found.requester_phone, "+5511988887777")
+
+    def test_legacy_service_request_hydration_has_no_fabricated_data(self):
+        model = ServiceRequestModel.objects.create(
+            id=uuid4(),
+            organization_id=self.organization_a.id,
+            service_id=self.service_a.id,
+            title="Legacy Solicitation",
+            description="desc",
+            status=ServiceRequestModel.Status.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        found = self.repository.get_by_id(model.id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.requester_name, "")
+        self.assertEqual(found.requester_email, "")
+        self.assertEqual(found.requester_phone, "")
+
     def test_list_open_by_organization(self):
         self.repository.save(
             self._build_service_request(
