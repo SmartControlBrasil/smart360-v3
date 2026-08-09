@@ -32,6 +32,8 @@ from src.marketplace.domain.entities import (
     OpportunityUnlockQuote,
     OpportunityUnlockPricingConfiguration,
     OpportunityUnlockResult,
+    EconomicAcquisitionReconciliation,
+    EconomicAcquisitionReconciliationIssue,
     UnlockedOpportunityContact,
 )
 
@@ -2093,6 +2095,64 @@ class OpportunityUnlockQuoteDomainTests(SimpleTestCase):
         )
         with self.assertRaises(FrozenInstanceError):
             quote.reason = "Mutated"  # type: ignore
+
+
+class EconomicAcquisitionReconciliationTests(SimpleTestCase):
+    def test_consistent_result_has_no_issues(self):
+        result = EconomicAcquisitionReconciliation(
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            consistent=True,
+            issues=(),
+            access_id=uuid4(),
+            interest_id=uuid4(),
+            settlement_id=uuid4(),
+            debit_entry_ids=(uuid4(),),
+        )
+
+        self.assertTrue(result.consistent)
+        self.assertEqual(result.issues, ())
+
+    def test_inconsistent_result_requires_structured_issue(self):
+        result = EconomicAcquisitionReconciliation(
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            consistent=False,
+            issues=(EconomicAcquisitionReconciliationIssue.ACCESS_WITHOUT_SETTLEMENT,),
+        )
+
+        self.assertFalse(result.consistent)
+        self.assertEqual(
+            result.issues,
+            (EconomicAcquisitionReconciliationIssue.ACCESS_WITHOUT_SETTLEMENT,),
+        )
+
+    def test_consistent_result_with_issues_is_rejected(self):
+        with self.assertRaises(ValueError):
+            EconomicAcquisitionReconciliation(
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                consistent=True,
+                issues=(EconomicAcquisitionReconciliationIssue.ACCESS_WITHOUT_SETTLEMENT,),
+            )
+
+    def test_inconsistent_result_without_issue_is_rejected(self):
+        with self.assertRaises(ValueError):
+            EconomicAcquisitionReconciliation(
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                consistent=False,
+                issues=(),
+            )
+
+    def test_invalid_issue_code_rejected(self):
+        with self.assertRaises(ValueError):
+            EconomicAcquisitionReconciliation(
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                consistent=False,
+                issues=("access_without_settlement",),
+            )
 
 
 class OpportunityUnlockResultDomainTests(SimpleTestCase):

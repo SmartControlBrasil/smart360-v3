@@ -749,6 +749,56 @@ class CreditSettlementResult:
             raise ValueError("settlement method must be CREDIT.")
 
 
+
+
+class EconomicAcquisitionReconciliationIssue(StrEnum):
+    ACCESS_WITHOUT_SETTLEMENT = "access_without_settlement"
+    SETTLEMENT_WITHOUT_DEBIT = "settlement_without_debit"
+    DEBIT_WITHOUT_SETTLEMENT = "debit_without_settlement"
+    ORGANIZATION_MISMATCH = "organization_mismatch"
+    OPPORTUNITY_MISMATCH = "opportunity_mismatch"
+    PROVIDER_MISMATCH = "provider_mismatch"
+    DUPLICATE_ECONOMIC_ACQUISITION = "duplicate_economic_acquisition"
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicAcquisitionReconciliation:
+    opportunity_id: UUID
+    provider_id: UUID
+    consistent: bool
+    issues: tuple[EconomicAcquisitionReconciliationIssue, ...]
+    access_id: UUID | None = None
+    interest_id: UUID | None = None
+    settlement_id: UUID | None = None
+    debit_entry_ids: tuple[UUID, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("EconomicAcquisitionReconciliation opportunity_id must be a UUID instance.")
+        if self.provider_id is None or not isinstance(self.provider_id, UUID):
+            raise ValueError("EconomicAcquisitionReconciliation provider_id must be a UUID instance.")
+        if self.consistent is None or not isinstance(self.consistent, bool):
+            raise ValueError("EconomicAcquisitionReconciliation consistent must be a boolean.")
+        if not isinstance(self.issues, tuple):
+            raise ValueError("EconomicAcquisitionReconciliation issues must be a tuple.")
+        for issue in self.issues:
+            if not isinstance(issue, EconomicAcquisitionReconciliationIssue):
+                raise ValueError("EconomicAcquisitionReconciliation issues must contain issue codes.")
+        if self.consistent and self.issues:
+            raise ValueError("Consistent reconciliation cannot contain issues.")
+        if not self.consistent and not self.issues:
+            raise ValueError("Inconsistent reconciliation requires at least one issue.")
+        for attr_name in ("access_id", "interest_id", "settlement_id"):
+            value = getattr(self, attr_name)
+            if value is not None and not isinstance(value, UUID):
+                raise ValueError(f"EconomicAcquisitionReconciliation {attr_name} must be a UUID instance or None.")
+        if not isinstance(self.debit_entry_ids, tuple):
+            raise ValueError("EconomicAcquisitionReconciliation debit_entry_ids must be a tuple.")
+        for entry_id in self.debit_entry_ids:
+            if not isinstance(entry_id, UUID):
+                raise ValueError("EconomicAcquisitionReconciliation debit_entry_ids must contain UUID instances.")
+
+
 @dataclass(frozen=True, slots=True)
 class OpportunityUnlockResult:
     access: OpportunityAccess

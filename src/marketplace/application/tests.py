@@ -30,6 +30,7 @@ from src.marketplace.application.use_cases import (
     GetOpportunityPreview,
     GetOpportunityUnlockQuote,
     UnlockOpportunityWithCredits,
+    ReconcileOpportunityEconomicAcquisition,
     GetUnlockedOpportunityContact,
 )
 from src.marketplace.domain.entities import (
@@ -60,6 +61,7 @@ from src.marketplace.domain.entities import (
     OpportunityUnlockQuote,
     OpportunityPricingUnavailable,
     OpportunityUnlockResult,
+    EconomicAcquisitionReconciliationIssue,
     UnlockedOpportunityContact,
     ProviderOpportunityInboxItem,
     ProviderUnlockedOpportunityItem,
@@ -1116,6 +1118,14 @@ class InMemoryCreditLedgerEntryRepository:
     def list_by_wallet(self, wallet_id: UUID) -> list[CreditLedgerEntry]:
         # Return deterministic chronological order (created_at ASC, id ASC)
         results = [e for e in self._items.values() if e.wallet_id == wallet_id]
+        results.sort(key=lambda x: (x.created_at, x.id))
+        return results
+
+    def list_debits_by_reference(self, reference: str) -> list[CreditLedgerEntry]:
+        results = [
+            e for e in self._items.values()
+            if e.direction is CreditLedgerDirection.DEBIT and e.reference == reference
+        ]
         results.sort(key=lambda x: (x.created_at, x.id))
         return results
 
@@ -7712,6 +7722,227 @@ class GetOpportunityUnlockQuoteTests(SimpleTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             use_case_unexpected.execute(opportunity_invitation_id=invitation.id)
         self.assertEqual(str(ctx.exception), "Internal database connection error")
+
+
+class ReconcileOpportunityEconomicAcquisitionTests(SimpleTestCase):
+    def setUp(self):
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.invitation_repo = InMemoryOpportunityInvitationRepository()
+        self.interest_repo = InMemoryOpportunityInterestRepository()
+        self.access_repo = InMemoryOpportunityAccessRepository()
+        self.settlement_repo = InMemoryEconomicSettlementRepository()
+        self.wallet_repo = InMemoryCreditWalletRepository()
+        self.ledger_repo = InMemoryCreditLedgerEntryRepository()
+        self.use_case = ReconcileOpportunityEconomicAcquisition(
+            opportunity_repository=self.opp_repo,
+            provider_repository=self.provider_repo,
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_interest_repository=self.interest_repo,
+            opportunity_access_repository=self.access_repo,
+            economic_settlement_repository=self.settlement_repo,
+            credit_wallet_repository=self.wallet_repo,
+            credit_ledger_entry_repository=self.ledger_repo,
+        )
+
+    def _base(self):
+        now = datetime.now(timezone.utc)
+        provider = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider",
+            slug=f"provider-{uuid4().hex[:8]}",
+            description="",
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.provider_repo.save(provider)
+        opportunity = Opportunity(
+            id=uuid4(),
+            service_request_id=uuid4(),
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=now,
+            updated_at=now,
+        )
+        self.opp_repo.save(opportunity)
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=now,
+        )
+        self.invitation_repo.save(invitation)
+        wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=provider.organization_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repo.save(wallet)
+        return provider, opportunity, invitation, wallet
+
+    def _interest(self, invitation):
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=invitation.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.interest_repo.save(interest)
+        return interest
+
+    def _settlement(self, interest, amount_minor=2500):
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(amount_minor=amount_minor, currency="BRL"),
+            created_at=datetime.now(timezone.utc),
+            pricing_source="configured_opportunity_unlock_base_price",
+            pricing_configuration_id=uuid4(),
+            pricing_resolved_at=datetime.now(timezone.utc),
+        )
+        self.settlement_repo.save(settlement)
+        return settlement
+
+    def _access(self, opportunity, provider):
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opportunity.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+        return access
+
+    def _debit(self, wallet, interest, units=25):
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=units,
+            reason="Opportunity access economic settlement",
+            reference=f"opportunity-interest:{interest.id}",
+            created_at=datetime.now(timezone.utc),
+        )
+        self.ledger_repo.save(debit)
+        return debit
+
+    def test_consistent_acquisition(self):
+        provider, opportunity, invitation, wallet = self._base()
+        interest = self._interest(invitation)
+        settlement = self._settlement(interest)
+        access = self._access(opportunity, provider)
+        debit = self._debit(wallet, interest)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertTrue(result.consistent)
+        self.assertEqual(result.issues, ())
+        self.assertEqual(result.access_id, access.id)
+        self.assertEqual(result.interest_id, interest.id)
+        self.assertEqual(result.settlement_id, settlement.id)
+        self.assertEqual(result.debit_entry_ids, (debit.id,))
+
+    def test_access_without_settlement_is_inconsistent(self):
+        provider, opportunity, invitation, wallet = self._base()
+        self._access(opportunity, provider)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertFalse(result.consistent)
+        self.assertIn(
+            EconomicAcquisitionReconciliationIssue.ACCESS_WITHOUT_SETTLEMENT,
+            result.issues,
+        )
+
+    def test_settlement_without_debit_is_inconsistent(self):
+        provider, opportunity, invitation, wallet = self._base()
+        interest = self._interest(invitation)
+        self._settlement(interest)
+        self._access(opportunity, provider)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertFalse(result.consistent)
+        self.assertIn(
+            EconomicAcquisitionReconciliationIssue.SETTLEMENT_WITHOUT_DEBIT,
+            result.issues,
+        )
+
+    def test_debit_without_settlement_is_inconsistent(self):
+        provider, opportunity, invitation, wallet = self._base()
+        interest = self._interest(invitation)
+        self._debit(wallet, interest)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertFalse(result.consistent)
+        self.assertIn(
+            EconomicAcquisitionReconciliationIssue.DEBIT_WITHOUT_SETTLEMENT,
+            result.issues,
+        )
+
+    def test_debit_from_other_organization_is_mismatch(self):
+        provider, opportunity, invitation, wallet = self._base()
+        other_wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=uuid4(),
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.wallet_repo.save(other_wallet)
+        interest = self._interest(invitation)
+        self._settlement(interest)
+        self._access(opportunity, provider)
+        self._debit(other_wallet, interest)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertFalse(result.consistent)
+        self.assertIn(
+            EconomicAcquisitionReconciliationIssue.ORGANIZATION_MISMATCH,
+            result.issues,
+        )
+
+    def test_duplicate_debits_are_duplicate_economic_acquisition(self):
+        provider, opportunity, invitation, wallet = self._base()
+        interest = self._interest(invitation)
+        self._settlement(interest)
+        self._access(opportunity, provider)
+        first = self._debit(wallet, interest)
+        second = self._debit(wallet, interest)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertFalse(result.consistent)
+        self.assertIn(
+            EconomicAcquisitionReconciliationIssue.DUPLICATE_ECONOMIC_ACQUISITION,
+            result.issues,
+        )
+        self.assertEqual(result.debit_entry_ids, (first.id, second.id))
+
+    def test_historical_pricing_snapshot_is_not_repriced(self):
+        provider, opportunity, invitation, wallet = self._base()
+        interest = self._interest(invitation)
+        settlement = self._settlement(interest, amount_minor=1000)
+        self._access(opportunity, provider)
+        self._debit(wallet, interest)
+
+        result = self.use_case.execute(opportunity_id=opportunity.id, provider_id=provider.id)
+
+        self.assertTrue(result.consistent)
+        self.assertEqual(result.settlement_id, settlement.id)
+        self.assertEqual(self.settlement_repo.get_by_interest(interest.id).amount.amount_minor, 1000)
+
+    def test_invalid_ids_rejected_without_repository_lookup(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_id=None, provider_id=uuid4())
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_id=uuid4(), provider_id=None)
 
 
 class UnlockOpportunityWithCreditsTests(SimpleTestCase):

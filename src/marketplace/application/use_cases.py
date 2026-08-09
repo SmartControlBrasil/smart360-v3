@@ -52,6 +52,8 @@ from src.marketplace.domain.entities import (
     OpportunityPreview,
     OpportunityUnlockQuote,
     OpportunityPricingUnavailable,
+    EconomicAcquisitionReconciliation,
+    EconomicAcquisitionReconciliationIssue,
     ProviderOpportunityInboxItem,
     ProviderOpportunityInboxPage,
     ProviderUnlockedOpportunityItem,
@@ -1667,6 +1669,102 @@ class UnlockOpportunityWithCredits:
             already_unlocked=False,
             settlement_id=settlement.id,
             amount=quote.amount,
+        )
+
+
+class ReconcileOpportunityEconomicAcquisition:
+    def __init__(
+        self,
+        *,
+        opportunity_repository: OpportunityRepository,
+        provider_repository: ProviderRepository,
+        opportunity_invitation_repository: OpportunityInvitationRepository,
+        opportunity_interest_repository: OpportunityInterestRepository,
+        opportunity_access_repository: OpportunityAccessRepository,
+        economic_settlement_repository: EconomicSettlementRepository,
+        credit_wallet_repository: CreditWalletRepository,
+        credit_ledger_entry_repository: CreditLedgerEntryRepository,
+    ):
+        self.opportunity_repository = opportunity_repository
+        self.provider_repository = provider_repository
+        self.opportunity_invitation_repository = opportunity_invitation_repository
+        self.opportunity_interest_repository = opportunity_interest_repository
+        self.opportunity_access_repository = opportunity_access_repository
+        self.economic_settlement_repository = economic_settlement_repository
+        self.credit_wallet_repository = credit_wallet_repository
+        self.credit_ledger_entry_repository = credit_ledger_entry_repository
+
+    def execute(
+        self,
+        *,
+        opportunity_id: UUID,
+        provider_id: UUID,
+    ) -> EconomicAcquisitionReconciliation:
+        if opportunity_id is None or not isinstance(opportunity_id, UUID):
+            raise ValueError("Opportunity id is required and must be a UUID instance.")
+        if provider_id is None or not isinstance(provider_id, UUID):
+            raise ValueError("Provider id is required and must be a UUID instance.")
+
+        opportunity = self.opportunity_repository.get_by_id(opportunity_id)
+        if opportunity is None:
+            raise ValueError("Opportunity does not exist.")
+
+        provider = self.provider_repository.get_by_id(provider_id)
+        if provider is None:
+            raise ValueError("Provider does not exist.")
+
+        issues: list[EconomicAcquisitionReconciliationIssue] = []
+        access = self.opportunity_access_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+        )
+        invitation = self.opportunity_invitation_repository.get_by_opportunity_and_provider(
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+        )
+        interest = None
+        settlement = None
+        debits: list[CreditLedgerEntry] = []
+        wallet = self.credit_wallet_repository.get_by_organization(provider.organization_id)
+
+        if invitation is not None:
+            if invitation.opportunity_id != opportunity_id:
+                issues.append(EconomicAcquisitionReconciliationIssue.OPPORTUNITY_MISMATCH)
+            if invitation.provider_id != provider_id:
+                issues.append(EconomicAcquisitionReconciliationIssue.PROVIDER_MISMATCH)
+            interest = self.opportunity_interest_repository.get_by_invitation(invitation.id)
+
+        if interest is not None:
+            settlement = self.economic_settlement_repository.get_by_interest(interest.id)
+            reference = f"opportunity-interest:{interest.id}"
+            debits = self.credit_ledger_entry_repository.list_debits_by_reference(reference)
+            if wallet is not None:
+                for debit in debits:
+                    if debit.wallet_id != wallet.id:
+                        issues.append(EconomicAcquisitionReconciliationIssue.ORGANIZATION_MISMATCH)
+
+        if access is not None and settlement is None:
+            issues.append(EconomicAcquisitionReconciliationIssue.ACCESS_WITHOUT_SETTLEMENT)
+
+        if settlement is not None and settlement.method is SettlementMethod.CREDIT and settlement.amount.amount_minor > 0 and not debits:
+            issues.append(EconomicAcquisitionReconciliationIssue.SETTLEMENT_WITHOUT_DEBIT)
+
+        if debits and settlement is None:
+            issues.append(EconomicAcquisitionReconciliationIssue.DEBIT_WITHOUT_SETTLEMENT)
+
+        if len(debits) > 1:
+            issues.append(EconomicAcquisitionReconciliationIssue.DUPLICATE_ECONOMIC_ACQUISITION)
+
+        deduped_issues = tuple(dict.fromkeys(issues))
+        return EconomicAcquisitionReconciliation(
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+            consistent=not deduped_issues,
+            issues=deduped_issues,
+            access_id=access.id if access is not None else None,
+            interest_id=interest.id if interest is not None else None,
+            settlement_id=settlement.id if settlement is not None else None,
+            debit_entry_ids=tuple(debit.id for debit in debits),
         )
 
 

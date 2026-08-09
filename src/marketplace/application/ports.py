@@ -373,6 +373,12 @@ class CreditLedgerEntryRepository(Protocol):
     ) -> list[CreditLedgerEntry]:
         ...
 
+    def list_debits_by_reference(
+        self,
+        reference: str,
+    ) -> list[CreditLedgerEntry]:
+        ...
+
 
 class CreditCostPolicy(Protocol):
     def units_required(

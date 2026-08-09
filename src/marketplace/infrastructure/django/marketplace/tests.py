@@ -2690,6 +2690,43 @@ class DjangoCreditLedgerEntryRepositoryTests(TestCase):
         self.assertEqual(len(list2), 1)
         self.assertEqual(list2[0].id, e2_isolated.id)
 
+    def test_list_debits_by_reference_filters_debits_only(self):
+        reference = f"opportunity-interest:{uuid4()}"
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Opportunity access economic settlement",
+            reference=reference,
+            created_at=datetime.now(timezone.utc),
+        )
+        credit_same_reference = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.CREDIT,
+            units=25,
+            reason="Credit adjustment",
+            reference=reference,
+            created_at=datetime.now(timezone.utc),
+        )
+        other_debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Other debit",
+            reference="other-reference",
+            created_at=datetime.now(timezone.utc),
+        )
+        self.ledger_repository.save(debit)
+        self.ledger_repository.save(credit_same_reference)
+        self.ledger_repository.save(other_debit)
+
+        results = self.ledger_repository.list_debits_by_reference(reference)
+
+        self.assertEqual([entry.id for entry in results], [debit.id])
+
     def test_protect_prevents_wallet_deletion_with_ledger_entries(self):
         entry = CreditLedgerEntry(
             id=uuid4(),

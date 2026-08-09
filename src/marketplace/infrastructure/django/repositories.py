@@ -846,6 +846,13 @@ class DjangoCreditLedgerEntryRepository(CreditLedgerEntryRepository):
         models = CreditLedgerEntryModel.objects.filter(wallet_id=wallet_id).order_by("created_at", "id")
         return [self._to_entity(m) for m in models]
 
+    def list_debits_by_reference(self, reference: str) -> list[CreditLedgerEntry]:
+        models = CreditLedgerEntryModel.objects.filter(
+            direction=CreditLedgerDirection.DEBIT.value,
+            reference=reference,
+        ).order_by("created_at", "id")
+        return [self._to_entity(m) for m in models]
+
 
 class DjangoCreditSettlementAtomicWriter(CreditSettlementAtomicWriter):
     def persist(
