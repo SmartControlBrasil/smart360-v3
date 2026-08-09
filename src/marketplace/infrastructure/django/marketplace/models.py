@@ -137,6 +137,9 @@ class ProviderServiceModel(models.Model):
 
 class ServiceRequestModel(models.Model):
     class Status(models.TextChoices):
+        CAPTURED = "captured", "Captured"
+        QUALIFYING = "qualifying", "Qualifying"
+        QUALIFIED = "qualified", "Qualified"
         OPEN = "open", "Open"
         CANCELLED = "cancelled", "Cancelled"
         CLOSED = "closed", "Closed"
@@ -155,13 +158,16 @@ class ServiceRequestModel(models.Model):
         ServiceModel,
         on_delete=models.PROTECT,
         related_name="service_requests",
+        null=True,
+        blank=True,
     )
-    title = models.CharField(max_length=255)
+    title = models.CharField(max_length=255, blank=True, default="")
     description = models.TextField(blank=True, default="")
+    raw_description = models.TextField(blank=True, default="")
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
-        default=Status.OPEN,
+        default=Status.CAPTURED,
     )
     requester_name = models.CharField(
         max_length=255,

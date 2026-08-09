@@ -10,6 +10,7 @@ from src.marketplace.application.use_cases import (
     CreateProviderService,
     CreateService,
     CreateServiceCategory,
+    CaptureServiceRequest,
     CreateServiceRequest,
     DiscoverCandidates,
     DistributeOpportunity,
@@ -779,7 +780,7 @@ class InMemoryServiceRequestRepository:
             item
             for item in self._items.values()
             if item.organization_id == organization_id
-            and item.status == ServiceRequestStatus.OPEN
+            and item.status in (ServiceRequestStatus.OPEN, ServiceRequestStatus.QUALIFIED)
         ]
 
     def list_open_by_service(
@@ -790,7 +791,7 @@ class InMemoryServiceRequestRepository:
             item
             for item in self._items.values()
             if item.service_id == service_id
-            and item.status == ServiceRequestStatus.OPEN
+            and item.status in (ServiceRequestStatus.OPEN, ServiceRequestStatus.QUALIFIED)
         ]
 
 
@@ -1529,6 +1530,80 @@ class CreateProviderServiceTests(SimpleTestCase):
             use_case.execute(provider_id=provider.id, service_id=service.id)
 
 
+class CaptureServiceRequestTests(SimpleTestCase):
+    @staticmethod
+    def _organization(organization_id: UUID, *, is_active: bool = True) -> Organization:
+        now = datetime.now(timezone.utc)
+        return Organization(
+            id=organization_id,
+            name="Org Solicitante",
+            slug="org-capture",
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def test_capture_need_without_service_id_or_fake_default(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_request_repository = InMemoryServiceRequestRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+        use_case = CaptureServiceRequest(
+            service_request_repository=service_request_repository,
+            organization_repository=organization_repository,
+        )
+        raw = "  Minha maquina CNC nao referencia o eixo Y  "
+
+        captured = use_case.execute(
+            organization_id=organization.id,
+            raw_description=raw,
+            requester_name="Alice",
+        )
+
+        self.assertEqual(captured.status, ServiceRequestStatus.CAPTURED)
+        self.assertIsNone(captured.service_id)
+        self.assertEqual(captured.raw_description, raw)
+        self.assertEqual(captured.title, "")
+        self.assertFalse(captured.is_qualified_for_marketplace())
+        self.assertEqual(service_request_repository.save_calls, 1)
+
+    def test_capture_rejects_blank_raw_description(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_request_repository = InMemoryServiceRequestRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+        use_case = CaptureServiceRequest(
+            service_request_repository=service_request_repository,
+            organization_repository=organization_repository,
+        )
+
+        with self.assertRaises(ValueError):
+            use_case.execute(organization_id=organization.id, raw_description="   ")
+
+        self.assertEqual(service_request_repository.save_calls, 0)
+
+    def test_capture_does_not_create_placeholder_service(self):
+        organization_repository = InMemoryOrganizationRepository()
+        service_request_repository = InMemoryServiceRequestRepository()
+        organization = self._organization(uuid4())
+        organization_repository.save(organization)
+        use_case = CaptureServiceRequest(
+            service_request_repository=service_request_repository,
+            organization_repository=organization_repository,
+        )
+
+        captured = use_case.execute(
+            organization_id=organization.id,
+            raw_description="Preciso resolver um alarme desconhecido",
+        )
+
+        self.assertIsNone(captured.service_id)
+        self.assertNotIn("Unknown", captured.title)
+        self.assertNotIn("General", captured.title)
+        self.assertNotIn("Other", captured.title)
+
+
+
 class CreateServiceRequestTests(SimpleTestCase):
     @staticmethod
     def _organization(
@@ -1589,9 +1664,11 @@ class CreateServiceRequestTests(SimpleTestCase):
         )
 
         self.assertIsInstance(created.id, UUID)
-        self.assertEqual(created.status, ServiceRequestStatus.OPEN)
+        self.assertEqual(created.status, ServiceRequestStatus.QUALIFIED)
         self.assertEqual(created.title, "Falha em CLP")
         self.assertEqual(created.description, "Linha parada")
+        self.assertEqual(created.raw_description, "  Linha parada  ")
+        self.assertTrue(created.is_qualified_for_marketplace())
         self.assertEqual(created.organization_id, organization.id)
         self.assertEqual(created.service_id, service.id)
         self.assertIsNotNone(created.created_at.tzinfo)
@@ -1765,9 +1842,10 @@ class DiscoverCandidatesTests(SimpleTestCase):
             id=service_request_id,
             organization_id=uuid4(),
             service_id=service_id,
-            title="Demanda tecnica",
+            title="Demanda tecnica" if status is not ServiceRequestStatus.CAPTURED else "",
             description="Descricao",
             status=status,
+            raw_description="Descricao original da necessidade" if status is ServiceRequestStatus.CAPTURED else "",
             created_at=now,
             updated_at=now,
         )
@@ -1807,6 +1885,27 @@ class DiscoverCandidatesTests(SimpleTestCase):
             created_at=now,
             updated_at=now,
         )
+
+    def test_unqualified_need_is_not_eligible_for_candidate_discovery(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        provider_service_repository = InMemoryProviderServiceRepository()
+        provider_repository = InMemoryProviderRepository()
+        request = self._service_request(
+            uuid4(),
+            service_id=None,
+            status=ServiceRequestStatus.CAPTURED,
+        )
+        service_request_repository.save(request)
+        use_case = DiscoverCandidates(
+            service_request_repository=service_request_repository,
+            provider_service_repository=provider_service_repository,
+            provider_repository=provider_repository,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            use_case.execute(service_request_id=request.id)
+
+        self.assertIn("qualified for candidate discovery", str(ctx.exception))
 
     def test_discovery_valid_with_single_eligible_provider(self):
         service_request_repository = InMemoryServiceRequestRepository()
@@ -2233,18 +2332,44 @@ class CreateOpportunityTests(SimpleTestCase):
         service_request_id: UUID,
         *,
         status: ServiceRequestStatus = ServiceRequestStatus.OPEN,
+        service_id: UUID | None = None,
     ) -> ServiceRequest:
         now = datetime.now(timezone.utc)
         return ServiceRequest(
             id=service_request_id,
             organization_id=uuid4(),
-            service_id=uuid4(),
-            title="Demanda",
+            service_id=(
+                service_id
+                if service_id is not None
+                else (None if status is ServiceRequestStatus.CAPTURED else uuid4())
+            ),
+            title="" if status is ServiceRequestStatus.CAPTURED else "Demanda",
             description="Descricao",
             status=status,
+            raw_description="Descricao original da necessidade" if status is ServiceRequestStatus.CAPTURED else "",
             created_at=now,
             updated_at=now,
         )
+
+    def test_unqualified_need_cannot_create_opportunity(self):
+        service_request_repository = InMemoryServiceRequestRepository()
+        opportunity_repository = InMemoryOpportunityRepository()
+        service_request = self._service_request(
+            uuid4(),
+            status=ServiceRequestStatus.CAPTURED,
+            service_id=None,
+        )
+        service_request_repository.save(service_request)
+        use_case = CreateOpportunity(
+            opportunity_repository=opportunity_repository,
+            service_request_repository=service_request_repository,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            use_case.execute(service_request_id=service_request.id)
+
+        self.assertIn("qualified to create an Opportunity", str(ctx.exception))
+        self.assertEqual(opportunity_repository.save_calls, 0)
 
     def test_valid_creation(self):
         service_request_repository = InMemoryServiceRequestRepository()
@@ -7073,7 +7198,7 @@ class GetOpportunityPreviewTests(SimpleTestCase):
 
         with self.assertRaises(ValueError) as ctx:
             self.use_case.execute(opportunity_invitation_id=invitation.id)
-        self.assertIn("ServiceRequest is not OPEN", str(ctx.exception))
+        self.assertIn("ServiceRequest is not qualified for marketplace access", str(ctx.exception))
 
     def test_provider_inactive_rejected(self):
         provider_id = uuid4()
@@ -7445,7 +7570,7 @@ class GetOpportunityUnlockQuoteTests(SimpleTestCase):
 
         with self.assertRaises(ValueError) as ctx:
             self.use_case.execute(opportunity_invitation_id=invitation.id)
-        self.assertIn("ServiceRequest is not OPEN", str(ctx.exception))
+        self.assertIn("ServiceRequest is not qualified for marketplace access", str(ctx.exception))
 
     def test_provider_inactive_rejected(self):
         provider_id = uuid4()
@@ -8239,7 +8364,7 @@ class UnlockOpportunityWithCreditsTests(SimpleTestCase):
         provider, sr, opp, invitation = self._setup_base_entities(sr_open=False)
         with self.assertRaises(ValueError) as ctx:
             self.use_case.execute(opportunity_invitation_id=invitation.id)
-        self.assertIn("ServiceRequest is not OPEN", str(ctx.exception))
+        self.assertIn("ServiceRequest is not qualified for marketplace access", str(ctx.exception))
 
     def test_atomic_rollback_on_access_creation_failure(self):
         org_id = uuid4()

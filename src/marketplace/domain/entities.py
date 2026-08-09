@@ -145,6 +145,9 @@ class ProviderService:
 
 
 class ServiceRequestStatus(StrEnum):
+    CAPTURED = "captured"
+    QUALIFYING = "qualifying"
+    QUALIFIED = "qualified"
     OPEN = "open"
     CANCELLED = "cancelled"
     CLOSED = "closed"
@@ -154,7 +157,7 @@ class ServiceRequestStatus(StrEnum):
 class ServiceRequest:
     id: UUID
     organization_id: UUID
-    service_id: UUID
+    service_id: UUID | None
     title: str
     description: str
     status: ServiceRequestStatus
@@ -163,6 +166,7 @@ class ServiceRequest:
     requester_name: str = ""
     requester_email: str = ""
     requester_phone: str = ""
+    raw_description: str = ""
 
     def __post_init__(self) -> None:
         if self.organization_id is None:
@@ -172,20 +176,20 @@ class ServiceRequest:
                 "ServiceRequest organization_id must be a valid UUID instance."
             )
 
-        if self.service_id is None:
-            raise ValueError("ServiceRequest service_id is required.")
-        if not isinstance(self.service_id, UUID):
+        if self.service_id is not None and not isinstance(self.service_id, UUID):
             raise ValueError(
-                "ServiceRequest service_id must be a valid UUID instance."
+                "ServiceRequest service_id must be a valid UUID instance or None."
             )
-
-        normalized_title = self.title.strip()
-        if not normalized_title:
-            raise ValueError("ServiceRequest title cannot be empty.")
 
         if not isinstance(self.status, ServiceRequestStatus):
             raise ValueError("ServiceRequest status must be a ServiceRequestStatus.")
 
+        if self.title is None or not isinstance(self.title, str):
+            raise ValueError("ServiceRequest title must be a string.")
+        if self.description is None or not isinstance(self.description, str):
+            raise ValueError("ServiceRequest description must be a string.")
+        if self.raw_description is None or not isinstance(self.raw_description, str):
+            raise ValueError("ServiceRequest raw_description must be a string.")
         if self.requester_name is None or not isinstance(self.requester_name, str):
             raise ValueError("ServiceRequest requester_name must be a string.")
         if self.requester_email is None or not isinstance(self.requester_email, str):
@@ -193,20 +197,68 @@ class ServiceRequest:
         if self.requester_phone is None or not isinstance(self.requester_phone, str):
             raise ValueError("ServiceRequest requester_phone must be a string.")
 
-        self.title = normalized_title
+        self.title = self.title.strip()
         self.description = self.description.strip()
         self.requester_name = self.requester_name.strip()
         self.requester_email = self.requester_email.strip()
         self.requester_phone = self.requester_phone.strip()
 
+        if self.status in (ServiceRequestStatus.CAPTURED, ServiceRequestStatus.QUALIFYING):
+            if not self.raw_description.strip():
+                raise ValueError("Captured ServiceRequest requires raw_description.")
+
+        if self.status in (ServiceRequestStatus.QUALIFIED, ServiceRequestStatus.OPEN):
+            if self.service_id is None:
+                raise ValueError("Qualified ServiceRequest requires service_id.")
+            if not self.title:
+                raise ValueError("Qualified ServiceRequest requires title.")
+
+    def is_qualified_for_marketplace(self) -> bool:
+        return (
+            self.status in (ServiceRequestStatus.QUALIFIED, ServiceRequestStatus.OPEN)
+            and self.service_id is not None
+        )
+
+    def start_qualification(self) -> None:
+        if self.status is not ServiceRequestStatus.CAPTURED:
+            raise ValueError("Only CAPTURED service requests can start qualification.")
+        self.status = ServiceRequestStatus.QUALIFYING
+
+    def qualify(
+        self,
+        *,
+        service_id: UUID,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        if self.status not in (ServiceRequestStatus.CAPTURED, ServiceRequestStatus.QUALIFYING):
+            raise ValueError("Only CAPTURED or QUALIFYING service requests can be qualified.")
+        if service_id is None or not isinstance(service_id, UUID):
+            raise ValueError("Qualified ServiceRequest requires a valid service_id.")
+
+        normalized_title = self.title if title is None else title.strip()
+        if not normalized_title:
+            raise ValueError("Qualified ServiceRequest requires title.")
+
+        self.service_id = service_id
+        self.title = normalized_title
+        if description is not None:
+            self.description = description.strip()
+        self.status = ServiceRequestStatus.QUALIFIED
+
     def cancel(self) -> None:
-        if self.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("Only OPEN service requests can be cancelled.")
+        if self.status not in (
+            ServiceRequestStatus.CAPTURED,
+            ServiceRequestStatus.QUALIFYING,
+            ServiceRequestStatus.QUALIFIED,
+            ServiceRequestStatus.OPEN,
+        ):
+            raise ValueError("Only active service requests can be cancelled.")
         self.status = ServiceRequestStatus.CANCELLED
 
     def close(self) -> None:
-        if self.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("Only OPEN service requests can be closed.")
+        if not self.is_qualified_for_marketplace():
+            raise ValueError("Only qualified service requests can be closed.")
         self.status = ServiceRequestStatus.CLOSED
 
 

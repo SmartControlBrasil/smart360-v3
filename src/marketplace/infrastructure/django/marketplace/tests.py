@@ -956,6 +956,7 @@ class DjangoServiceRequestRepositoryTests(TestCase):
 
         self.assertEqual(saved.id, service_request.id)
         self.assertEqual(saved.status, ServiceRequestStatus.OPEN)
+        self.assertTrue(saved.is_qualified_for_marketplace())
         self.assertTrue(
             ServiceRequestModel.objects.filter(id=service_request.id).exists()
         )
@@ -977,6 +978,49 @@ class DjangoServiceRequestRepositoryTests(TestCase):
 
     def test_get_by_id_returns_none_when_missing(self):
         self.assertIsNone(self.repository.get_by_id(uuid4()))
+
+    def test_save_and_retrieve_captured_need_without_service(self):
+        raw = "Minha maquina CNC nao referencia o eixo Y"
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=self.organization_a.id,
+            service_id=None,
+            title="",
+            description="",
+            status=ServiceRequestStatus.CAPTURED,
+            raw_description=raw,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        saved = self.repository.save(service_request)
+        found = self.repository.get_by_id(saved.id)
+
+        self.assertIsNone(found.service_id)
+        self.assertEqual(found.status, ServiceRequestStatus.CAPTURED)
+        self.assertEqual(found.raw_description, raw)
+        self.assertFalse(found.is_qualified_for_marketplace())
+
+    def test_save_and_retrieve_qualified_need_with_service(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=self.organization_a.id,
+            service_id=self.service_a.id,
+            title="Manutencao CLP",
+            description="Linha parada",
+            status=ServiceRequestStatus.QUALIFIED,
+            raw_description="Meu CLP parou e a linha esta parada",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        saved = self.repository.save(service_request)
+        found = self.repository.get_by_id(saved.id)
+
+        self.assertEqual(found.service_id, self.service_a.id)
+        self.assertEqual(found.status, ServiceRequestStatus.QUALIFIED)
+        self.assertEqual(found.raw_description, "Meu CLP parou e a linha esta parada")
+        self.assertTrue(found.is_qualified_for_marketplace())
 
     def test_save_retrieves_requester_contact_data(self):
         now = datetime.now(timezone.utc)
@@ -1018,6 +1062,7 @@ class DjangoServiceRequestRepositoryTests(TestCase):
         self.assertEqual(found.requester_name, "")
         self.assertEqual(found.requester_email, "")
         self.assertEqual(found.requester_phone, "")
+        self.assertEqual(found.raw_description, "")
 
     def test_list_open_by_organization(self):
         self.repository.save(

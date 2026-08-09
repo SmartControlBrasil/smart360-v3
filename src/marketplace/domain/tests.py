@@ -354,14 +354,17 @@ class ServiceRequestDomainTests(SimpleTestCase):
             service_id=uuid4(),
             title="  Manutencao de CLP  ",
             description="  CLP nao inicia  ",
-            status=ServiceRequestStatus.OPEN,
+            status=ServiceRequestStatus.QUALIFIED,
+            raw_description="CLP nao inicia",
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
 
         self.assertEqual(service_request.title, "Manutencao de CLP")
         self.assertEqual(service_request.description, "CLP nao inicia")
-        self.assertEqual(service_request.status, ServiceRequestStatus.OPEN)
+        self.assertEqual(service_request.raw_description, "CLP nao inicia")
+        self.assertEqual(service_request.status, ServiceRequestStatus.QUALIFIED)
+        self.assertTrue(service_request.is_qualified_for_marketplace())
 
     def test_organization_id_none_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -371,7 +374,7 @@ class ServiceRequestDomainTests(SimpleTestCase):
                 service_id=uuid4(),
                 title="Titulo",
                 description="x",
-                status=ServiceRequestStatus.OPEN,
+                status=ServiceRequestStatus.QUALIFIED,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
@@ -389,7 +392,25 @@ class ServiceRequestDomainTests(SimpleTestCase):
                 updated_at=datetime.now(timezone.utc),
             )
 
-    def test_service_id_none_is_rejected(self):
+    def test_captured_need_without_service_id_is_valid(self):
+        raw = "  Minha maquina CNC parou no eixo Y  "
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=None,
+            title="",
+            description="",
+            status=ServiceRequestStatus.CAPTURED,
+            raw_description=raw,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        self.assertIsNone(service_request.service_id)
+        self.assertEqual(service_request.raw_description, raw)
+        self.assertFalse(service_request.is_qualified_for_marketplace())
+
+    def test_qualified_need_without_service_id_is_rejected(self):
         with self.assertRaises(ValueError):
             ServiceRequest(
                 id=uuid4(),
@@ -397,7 +418,7 @@ class ServiceRequestDomainTests(SimpleTestCase):
                 service_id=None,
                 title="Titulo",
                 description="x",
-                status=ServiceRequestStatus.OPEN,
+                status=ServiceRequestStatus.QUALIFIED,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
@@ -440,6 +461,64 @@ class ServiceRequestDomainTests(SimpleTestCase):
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
+
+    def test_captured_need_requires_raw_description(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=uuid4(),
+                service_id=None,
+                title="",
+                description="",
+                status=ServiceRequestStatus.CAPTURED,
+                raw_description="   ",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_lifecycle_capture_to_qualifying_to_qualified(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=None,
+            title="",
+            description="",
+            status=ServiceRequestStatus.CAPTURED,
+            raw_description="Motor travando quando liga",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        service_request.start_qualification()
+        self.assertEqual(service_request.status, ServiceRequestStatus.QUALIFYING)
+
+        service_id = uuid4()
+        service_request.qualify(
+            service_id=service_id,
+            title="Manutencao de motor",
+            description="Motor travando",
+        )
+
+        self.assertEqual(service_request.status, ServiceRequestStatus.QUALIFIED)
+        self.assertEqual(service_request.service_id, service_id)
+        self.assertEqual(service_request.title, "Manutencao de motor")
+        self.assertEqual(service_request.description, "Motor travando")
+        self.assertTrue(service_request.is_qualified_for_marketplace())
+
+    def test_invalid_lifecycle_transitions_are_rejected(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Titulo",
+            description="x",
+            status=ServiceRequestStatus.QUALIFIED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            service_request.start_qualification()
+        with self.assertRaises(ValueError):
+            service_request.qualify(service_id=uuid4())
 
     def test_cancel_open_to_cancelled(self):
         service_request = ServiceRequest(
@@ -700,6 +779,64 @@ class OpportunityDomainTests(SimpleTestCase):
         )
         with self.assertRaises(ValueError):
             opportunity.close()
+
+    def test_captured_need_requires_raw_description(self):
+        with self.assertRaises(ValueError):
+            ServiceRequest(
+                id=uuid4(),
+                organization_id=uuid4(),
+                service_id=None,
+                title="",
+                description="",
+                status=ServiceRequestStatus.CAPTURED,
+                raw_description="   ",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+    def test_lifecycle_capture_to_qualifying_to_qualified(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=None,
+            title="",
+            description="",
+            status=ServiceRequestStatus.CAPTURED,
+            raw_description="Motor travando quando liga",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        service_request.start_qualification()
+        self.assertEqual(service_request.status, ServiceRequestStatus.QUALIFYING)
+
+        service_id = uuid4()
+        service_request.qualify(
+            service_id=service_id,
+            title="Manutencao de motor",
+            description="Motor travando",
+        )
+
+        self.assertEqual(service_request.status, ServiceRequestStatus.QUALIFIED)
+        self.assertEqual(service_request.service_id, service_id)
+        self.assertEqual(service_request.title, "Manutencao de motor")
+        self.assertEqual(service_request.description, "Motor travando")
+        self.assertTrue(service_request.is_qualified_for_marketplace())
+
+    def test_invalid_lifecycle_transitions_are_rejected(self):
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Titulo",
+            description="x",
+            status=ServiceRequestStatus.QUALIFIED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            service_request.start_qualification()
+        with self.assertRaises(ValueError):
+            service_request.qualify(service_id=uuid4())
 
     def test_cancel_open_to_cancelled(self):
         opportunity = Opportunity(

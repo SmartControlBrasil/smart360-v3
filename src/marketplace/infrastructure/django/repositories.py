@@ -334,6 +334,7 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
             requester_name=model.requester_name,
             requester_email=model.requester_email,
             requester_phone=model.requester_phone,
+            raw_description=model.raw_description,
         )
 
     def save(self, service_request: ServiceRequest) -> ServiceRequest:
@@ -348,6 +349,7 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
                 "requester_name": service_request.requester_name,
                 "requester_email": service_request.requester_email,
                 "requester_phone": service_request.requester_phone,
+                "raw_description": service_request.raw_description,
                 "created_at": service_request.created_at,
                 "updated_at": service_request.updated_at,
             },
@@ -372,7 +374,10 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
     ) -> list[ServiceRequest]:
         models = ServiceRequestModel.objects.filter(
             organization_id=organization_id,
-            status=ServiceRequestModel.Status.OPEN,
+            status__in=[
+                ServiceRequestModel.Status.OPEN,
+                ServiceRequestModel.Status.QUALIFIED,
+            ],
         ).order_by("created_at", "id")
         return [self._to_entity(model) for model in models]
 
@@ -382,7 +387,10 @@ class DjangoServiceRequestRepository(ServiceRequestRepository):
     ) -> list[ServiceRequest]:
         models = ServiceRequestModel.objects.filter(
             service_id=service_id,
-            status=ServiceRequestModel.Status.OPEN,
+            status__in=[
+                ServiceRequestModel.Status.OPEN,
+                ServiceRequestModel.Status.QUALIFIED,
+            ],
         ).order_by("created_at", "id")
         return [self._to_entity(model) for model in models]
 

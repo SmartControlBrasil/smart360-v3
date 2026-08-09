@@ -317,6 +317,66 @@ class CreateProviderService:
         return self.provider_service_repository.save(provider_service)
 
 
+class CaptureServiceRequest:
+    def __init__(
+        self,
+        service_request_repository: ServiceRequestRepository,
+        organization_repository: OrganizationRepository,
+    ):
+        self.service_request_repository = service_request_repository
+        self.organization_repository = organization_repository
+
+    def execute(
+        self,
+        *,
+        organization_id: UUID,
+        raw_description: str,
+        title: str = "",
+        description: str = "",
+        requester_name: str = "",
+        requester_email: str = "",
+        requester_phone: str = "",
+    ) -> ServiceRequest:
+        if organization_id is None:
+            raise ValueError("ServiceRequest organization_id is required.")
+        if not isinstance(organization_id, UUID):
+            raise ValueError(
+                "ServiceRequest organization_id must be a valid UUID instance."
+            )
+        if (
+            raw_description is None
+            or not isinstance(raw_description, str)
+            or not raw_description.strip()
+        ):
+            raise ValueError(
+                "raw_description is required to capture a ServiceRequest."
+            )
+
+        organization = self.organization_repository.get_by_id(organization_id)
+        if organization is None:
+            raise ValueError("Organization does not exist.")
+        if not organization.is_active:
+            raise ValueError("Organization is inactive.")
+
+        now = datetime.now(timezone.utc)
+        service_request = ServiceRequest(
+            id=uuid4(),
+            organization_id=organization_id,
+            service_id=None,
+            title=title,
+            description=description,
+            status=ServiceRequestStatus.CAPTURED,
+            requester_name=requester_name,
+            requester_email=requester_email,
+            requester_phone=requester_phone,
+            raw_description=raw_description,
+            created_at=now,
+            updated_at=now,
+        )
+
+        return self.service_request_repository.save(service_request)
+
+
 class CreateServiceRequest:
     def __init__(
         self,
@@ -338,6 +398,7 @@ class CreateServiceRequest:
         requester_name: str = "",
         requester_email: str = "",
         requester_phone: str = "",
+        raw_description: str | None = None,
     ) -> ServiceRequest:
         if organization_id is None:
             raise ValueError("ServiceRequest organization_id is required.")
@@ -377,7 +438,10 @@ class CreateServiceRequest:
         normalized_req_email = requester_email.strip()
         normalized_req_phone = requester_phone.strip()
         if not normalized_req_email and not normalized_req_phone:
-            raise ValueError("At least one contact channel (email or phone) must be provided for new requests.")
+            raise ValueError(
+                "At least one contact channel (email or phone) must be provided "
+                "for new requests."
+            )
 
         now = datetime.now(timezone.utc)
         service_request = ServiceRequest(
@@ -386,10 +450,11 @@ class CreateServiceRequest:
             service_id=service_id,
             title=normalized_title,
             description=normalized_description,
-            status=ServiceRequestStatus.OPEN,
+            status=ServiceRequestStatus.QUALIFIED,
             requester_name=normalized_req_name,
             requester_email=normalized_req_email,
             requester_phone=normalized_req_phone,
+            raw_description=raw_description if raw_description is not None else description,
             created_at=now,
             updated_at=now,
         )
@@ -421,8 +486,8 @@ class DiscoverCandidates:
         service_request = self.service_request_repository.get_by_id(service_request_id)
         if service_request is None:
             raise ValueError("ServiceRequest does not exist.")
-        if service_request.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("ServiceRequest must be OPEN for candidate discovery.")
+        if not service_request.is_qualified_for_marketplace():
+            raise ValueError("ServiceRequest must be qualified for candidate discovery.")
 
         provider_services = self.provider_service_repository.list_active_by_service(
             service_request.service_id,
@@ -475,8 +540,8 @@ class CreateOpportunity:
         )
         if service_request is None:
             raise ValueError("ServiceRequest does not exist.")
-        if service_request.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("ServiceRequest must be OPEN to create an Opportunity.")
+        if not service_request.is_qualified_for_marketplace():
+            raise ValueError("ServiceRequest must be qualified to create an Opportunity.")
 
         existing = self.opportunity_repository.get_by_service_request(
             service_request_id,
@@ -1401,8 +1466,8 @@ class GetOpportunityPreview:
         service_request = self.service_request_repository.get_by_id(opportunity.service_request_id)
         if service_request is None:
             raise ValueError("ServiceRequest does not exist.")
-        if service_request.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("ServiceRequest is not OPEN.")
+        if not service_request.is_qualified_for_marketplace():
+            raise ValueError("ServiceRequest is not qualified for marketplace access.")
 
         provider = self.provider_repository.get_by_id(invitation.provider_id)
         if provider is None:
@@ -1459,8 +1524,8 @@ class GetOpportunityUnlockQuote:
         service_request = self.service_request_repository.get_by_id(opportunity.service_request_id)
         if service_request is None:
             raise ValueError("ServiceRequest does not exist.")
-        if service_request.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("ServiceRequest is not OPEN.")
+        if not service_request.is_qualified_for_marketplace():
+            raise ValueError("ServiceRequest is not qualified for marketplace access.")
 
         provider = self.provider_repository.get_by_id(invitation.provider_id)
         if provider is None:
@@ -1558,8 +1623,8 @@ class UnlockOpportunityWithCredits:
         service_request = self.service_request_repository.get_by_id(opportunity.service_request_id)
         if service_request is None:
             raise ValueError("ServiceRequest does not exist.")
-        if service_request.status is not ServiceRequestStatus.OPEN:
-            raise ValueError("ServiceRequest is not OPEN.")
+        if not service_request.is_qualified_for_marketplace():
+            raise ValueError("ServiceRequest is not qualified for marketplace access.")
 
         provider = self.provider_repository.get_by_id(invitation.provider_id)
         if provider is None:
