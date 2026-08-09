@@ -30,6 +30,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceRequestModel,
     CreditWalletModel,
     CreditLedgerEntryModel,
+    EconomicSettlementModel,
     OpportunityContactReadAuditModel,
 )
 from src.marketplace.infrastructure.policies import (
@@ -362,6 +363,34 @@ class MarketplaceHTTPDeliveryBoundaryTests(TestCase):
         self.assertFalse(data["already_unlocked"])
         self.assertEqual(data["reason"], "No commercial pricing configured for pre-access unlock.")
 
+    def test_quote_has_no_economic_side_effects(self):
+        self.client.force_login(self.user_a)
+        url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+
+        before_interest_count = OpportunityInterestModel.objects.count()
+        before_access_count = OpportunityAccessModel.objects.count()
+        before_settlement_count = EconomicSettlementModel.objects.count()
+        before_ledger_count = CreditLedgerEntryModel.objects.count()
+        before_debit_count = CreditLedgerEntryModel.objects.filter(
+            direction=CreditLedgerDirection.DEBIT.value,
+        ).count()
+        before_wallet_count = CreditWalletModel.objects.count()
+
+        res = self.client.get(url)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(OpportunityInterestModel.objects.count(), before_interest_count)
+        self.assertEqual(OpportunityAccessModel.objects.count(), before_access_count)
+        self.assertEqual(EconomicSettlementModel.objects.count(), before_settlement_count)
+        self.assertEqual(CreditLedgerEntryModel.objects.count(), before_ledger_count)
+        self.assertEqual(
+            CreditLedgerEntryModel.objects.filter(
+                direction=CreditLedgerDirection.DEBIT.value,
+            ).count(),
+            before_debit_count,
+        )
+        self.assertEqual(CreditWalletModel.objects.count(), before_wallet_count)
+
     def test_quote_with_configured_pricing_policy(self):
         """Quote with explicit test double pricing policy."""
         url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
@@ -400,6 +429,8 @@ class MarketplaceHTTPDeliveryBoundaryTests(TestCase):
         res = self.client.get(url)
         data = res.json()
         self.assertNotIn("requester_name", data)
+        self.assertNotIn("requester_email", data)
+        self.assertNotIn("requester_phone", data)
 
     def test_quote_wrong_method_rejected(self):
         self.client.force_login(self.user_a)
