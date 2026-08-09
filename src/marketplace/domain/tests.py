@@ -1176,6 +1176,25 @@ class OpportunityPricingQuoteTests(SimpleTestCase):
         quote = OpportunityPricingQuote(amount=m, reason="  test_quote  ")
         self.assertEqual(quote.reason, "test_quote")
 
+    def test_pricing_metadata_is_preserved(self):
+        config_id = uuid4()
+        quote = OpportunityPricingQuote(
+            amount=Money(amount_minor=100, currency="BRL"),
+            reason="test_quote",
+            pricing_source=" configured_policy ",
+            pricing_configuration_id=config_id,
+        )
+
+        self.assertEqual(quote.pricing_source, "configured_policy")
+        self.assertEqual(quote.pricing_configuration_id, config_id)
+
+    def test_invalid_pricing_metadata_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            OpportunityPricingQuote(amount=m, reason="test", pricing_source="   ")
+        with self.assertRaises(ValueError):
+            OpportunityPricingQuote(amount=m, reason="test", pricing_configuration_id="not-a-uuid")
+
     def test_immutable_after_creation(self):
         m1 = Money(amount_minor=100, currency="BRL")
         m2 = Money(amount_minor=200, currency="USD")
@@ -1296,6 +1315,69 @@ class EconomicSettlementTests(SimpleTestCase):
         )
         with self.assertRaises(FrozenInstanceError):
             es.amount = m2
+
+    def test_pricing_snapshot_metadata_is_preserved(self):
+        config_id = uuid4()
+        resolved_at = datetime.now(timezone.utc)
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.CREDIT,
+            amount=Money(amount_minor=1500, currency="BRL"),
+            created_at=resolved_at,
+            pricing_source=" configured_policy ",
+            pricing_configuration_id=config_id,
+            pricing_resolved_at=resolved_at,
+        )
+
+        self.assertEqual(settlement.amount.amount_minor, 1500)
+        self.assertEqual(settlement.amount.currency, "BRL")
+        self.assertEqual(settlement.pricing_source, "configured_policy")
+        self.assertEqual(settlement.pricing_configuration_id, config_id)
+        self.assertEqual(settlement.pricing_resolved_at, resolved_at)
+
+    def test_legacy_settlement_without_pricing_source_is_allowed(self):
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=uuid4(),
+            method=SettlementMethod.CREDIT,
+            amount=Money(amount_minor=1000, currency="BRL"),
+            created_at=datetime.now(timezone.utc),
+        )
+
+        self.assertIsNone(settlement.pricing_source)
+        self.assertIsNone(settlement.pricing_configuration_id)
+        self.assertIsNone(settlement.pricing_resolved_at)
+
+    def test_invalid_pricing_snapshot_metadata_rejected(self):
+        m = Money(amount_minor=100, currency="BRL")
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=SettlementMethod.CREDIT,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+                pricing_source="   ",
+            )
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=SettlementMethod.CREDIT,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+                pricing_configuration_id="not-a-uuid",
+            )
+        with self.assertRaises(ValueError):
+            EconomicSettlement(
+                id=uuid4(),
+                interest_id=uuid4(),
+                method=SettlementMethod.CREDIT,
+                amount=m,
+                created_at=datetime.now(timezone.utc),
+                pricing_resolved_at=datetime.now(),
+            )
 
     def test_complimentary_positive_amount_rejected(self):
         m = Money(amount_minor=100, currency="BRL")

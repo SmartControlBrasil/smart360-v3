@@ -74,4 +74,6 @@ class ConfiguredOpportunityPricingPolicy(OpportunityPricingPolicy):
         return OpportunityPricingQuote(
             amount=configuration.amount,
             reason="configured_opportunity_unlock_base_price",
+            pricing_source="configured_opportunity_unlock_base_price",
+            pricing_configuration_id=configuration.id,
         )

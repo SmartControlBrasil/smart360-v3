@@ -479,6 +479,8 @@ class Money:
 class OpportunityPricingQuote:
     amount: Money
     reason: str
+    pricing_source: str | None = None
+    pricing_configuration_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.amount is None or not isinstance(self.amount, Money):
@@ -492,6 +494,17 @@ class OpportunityPricingQuote:
             raise ValueError("OpportunityPricingQuote reason cannot be empty.")
 
         object.__setattr__(self, "reason", normalized_reason)
+
+        if self.pricing_source is not None:
+            if not isinstance(self.pricing_source, str):
+                raise ValueError("OpportunityPricingQuote pricing_source must be None or a string.")
+            normalized_source = self.pricing_source.strip()
+            if not normalized_source:
+                raise ValueError("OpportunityPricingQuote pricing_source cannot be empty when supplied.")
+            object.__setattr__(self, "pricing_source", normalized_source)
+
+        if self.pricing_configuration_id is not None and not isinstance(self.pricing_configuration_id, UUID):
+            raise ValueError("OpportunityPricingQuote pricing_configuration_id must be a UUID instance or None.")
 
 
 class OpportunityPricingUnavailable(Exception):
@@ -573,6 +586,9 @@ class EconomicSettlement:
     method: SettlementMethod
     amount: Money
     created_at: datetime
+    pricing_source: str | None = None
+    pricing_configuration_id: UUID | None = None
+    pricing_resolved_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.id is None or not isinstance(self.id, UUID):
@@ -587,6 +603,23 @@ class EconomicSettlement:
             raise ValueError("EconomicSettlement created_at must be a datetime instance.")
         if self.created_at.tzinfo is None:
             raise ValueError("EconomicSettlement created_at must be timezone-aware.")
+
+        if self.pricing_source is not None:
+            if not isinstance(self.pricing_source, str):
+                raise ValueError("EconomicSettlement pricing_source must be None or a string.")
+            normalized_source = self.pricing_source.strip()
+            if not normalized_source:
+                raise ValueError("EconomicSettlement pricing_source cannot be empty when supplied.")
+            object.__setattr__(self, "pricing_source", normalized_source)
+
+        if self.pricing_configuration_id is not None and not isinstance(self.pricing_configuration_id, UUID):
+            raise ValueError("EconomicSettlement pricing_configuration_id must be a UUID instance or None.")
+
+        if self.pricing_resolved_at is not None:
+            if not isinstance(self.pricing_resolved_at, datetime):
+                raise ValueError("EconomicSettlement pricing_resolved_at must be a datetime instance or None.")
+            if self.pricing_resolved_at.tzinfo is None:
+                raise ValueError("EconomicSettlement pricing_resolved_at must be timezone-aware when supplied.")
 
         if self.method is SettlementMethod.COMPLIMENTARY and self.amount.amount_minor != 0:
             raise ValueError("COMPLIMENTARY settlement method requires amount_minor to be 0.")

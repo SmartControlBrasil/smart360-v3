@@ -51,10 +51,19 @@ UserModel = get_user_model()
 
 class TestOpportunityPricingPolicy(OpportunityPricingPolicy):
     """Test double pricing policy for HTTP contract verification."""
-    def __init__(self, amount_minor: int = 2500, currency: str = "BRL", reason: str = "Test pricing"):
+    def __init__(
+        self,
+        amount_minor: int = 2500,
+        currency: str = "BRL",
+        reason: str = "Test pricing",
+        pricing_source: str | None = None,
+        pricing_configuration_id: UUID | None = None,
+    ):
         self._amount_minor = amount_minor
         self._currency = currency
         self._reason = reason
+        self._pricing_source = pricing_source
+        self._pricing_configuration_id = pricing_configuration_id
 
     def quote(
         self,
@@ -69,6 +78,8 @@ class TestOpportunityPricingPolicy(OpportunityPricingPolicy):
         return OpportunityPricingQuote(
             amount=Money(amount_minor=self._amount_minor, currency=self._currency),
             reason=self._reason,
+            pricing_source=self._pricing_source,
+            pricing_configuration_id=self._pricing_configuration_id,
         )
 
 
@@ -592,6 +603,61 @@ class MarketplaceHTTPDeliveryBoundaryTests(TestCase):
         settlement = EconomicSettlementModel.objects.get(id=data["settlement_id"])
         self.assertEqual(settlement.amount_minor, 2500)
         self.assertEqual(settlement.currency, "BRL")
+
+    def test_unlock_ignores_client_controlled_currency_and_configuration_id(self):
+        server_config_id = uuid4()
+        attacker_config_id = uuid4()
+        pricing_policy = TestOpportunityPricingPolicy(
+            amount_minor=4200,
+            currency="BRL",
+            pricing_source="server_policy",
+            pricing_configuration_id=server_config_id,
+        )
+        service = build_authenticated_provider_marketplace_service(
+            pricing_policy=pricing_policy,
+            credit_cost_policy=self.test_cost_policy,
+        )
+        url = reverse("marketplace:unlock", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+        req = self.factory.post(
+            url,
+            data={
+                "amount": {"amount_minor": 1, "currency": "USD"},
+                "currency": "USD",
+                "pricing_configuration_id": str(attacker_config_id),
+            },
+            content_type="application/json",
+        )
+        req.user = self.user_a
+        req._marketplace_service = service
+
+        res = views.unlock_opportunity_view(req, opportunity_invitation_id=self.invitation_a.id)
+
+        self.assertEqual(res.status_code, 200)
+        import json
+        data = json.loads(res.content)
+        settlement = EconomicSettlementModel.objects.get(id=data["settlement_id"])
+        self.assertEqual(data["amount"], {"amount_minor": 4200, "currency": "BRL"})
+        self.assertEqual(settlement.amount_minor, 4200)
+        self.assertEqual(settlement.currency, "BRL")
+        self.assertEqual(settlement.pricing_source, "server_policy")
+        self.assertEqual(settlement.pricing_configuration_id, server_config_id)
+        self.assertNotEqual(settlement.pricing_configuration_id, attacker_config_id)
+
+    def test_unlock_settlement_does_not_store_pii(self):
+        url = reverse("marketplace:unlock", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+        req = self.factory.post(url)
+        req.user = self.user_a
+        req._marketplace_service = self.service_with_pricing
+
+        res = views.unlock_opportunity_view(req, opportunity_invitation_id=self.invitation_a.id)
+
+        self.assertEqual(res.status_code, 200)
+        import json
+        data = json.loads(res.content)
+        settlement = EconomicSettlementModel.objects.get(id=data["settlement_id"])
+        self.assertFalse(hasattr(settlement, "requester_name"))
+        self.assertFalse(hasattr(settlement, "requester_email"))
+        self.assertFalse(hasattr(settlement, "requester_phone"))
 
     def test_unlock_retry_idempotent_no_double_charge(self):
         url = reverse("marketplace:unlock", kwargs={"opportunity_invitation_id": self.invitation_a.id})

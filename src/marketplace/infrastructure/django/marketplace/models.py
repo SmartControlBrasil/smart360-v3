@@ -316,6 +316,9 @@ class EconomicSettlementModel(models.Model):
     method = models.CharField(max_length=50)
     amount_minor = models.BigIntegerField()
     currency = models.CharField(max_length=3)
+    pricing_source = models.CharField(max_length=100, null=True, blank=True)
+    pricing_configuration_id = models.UUIDField(null=True, blank=True)
+    pricing_resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField()
 
     class Meta:

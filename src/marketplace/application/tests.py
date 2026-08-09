@@ -4427,10 +4427,19 @@ class RequestOpportunityAccessTests(SimpleTestCase):
 
 
 class FakeOpportunityPricingPolicy:
-    def __init__(self, amount_minor: int = 2500, currency: str = "BRL", reason: str = "test_quote"):
+    def __init__(
+        self,
+        amount_minor: int = 2500,
+        currency: str = "BRL",
+        reason: str = "test_quote",
+        pricing_source: str | None = None,
+        pricing_configuration_id: UUID | None = None,
+    ):
         self.amount_minor = amount_minor
         self.currency = currency
         self.reason = reason
+        self.pricing_source = pricing_source
+        self.pricing_configuration_id = pricing_configuration_id
         self.call_count = 0
         self.last_interest = None
         self.last_invitation = None
@@ -4453,6 +4462,8 @@ class FakeOpportunityPricingPolicy:
         return OpportunityPricingQuote(
             amount=Money(amount_minor=self.amount_minor, currency=self.currency),
             reason=self.reason,
+            pricing_source=self.pricing_source,
+            pricing_configuration_id=self.pricing_configuration_id,
         )
 
 
@@ -7828,6 +7839,64 @@ class UnlockOpportunityWithCreditsTests(SimpleTestCase):
         self.assertFalse(hasattr(result, "requester_email"))
         self.assertFalse(hasattr(result, "requester_phone"))
 
+    def test_unlock_settlement_preserves_authoritative_pricing_snapshot(self):
+        org_id = uuid4()
+        config_id = uuid4()
+        self.pricing_policy = FakeOpportunityPricingPolicy(
+            amount_minor=3333,
+            currency="USD",
+            reason="configured_quote",
+            pricing_source="configured_policy",
+            pricing_configuration_id=config_id,
+        )
+        self.use_case.opportunity_pricing_policy = self.pricing_policy
+        self.cost_policy.rate_callback = lambda price: 12
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+        self.ledger_repo.save(CreditLedgerEntry(id=uuid4(), wallet_id=wallet.id, direction=CreditLedgerDirection.CREDIT, units=30, reason="Initial credit", reference="ref", created_at=datetime.now(timezone.utc)))
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        result = self.use_case.execute(opportunity_invitation_id=invitation.id)
+        interest = self.interest_repo.get_by_invitation(invitation.id)
+        settlement = self.settlement_repo.get_by_interest(interest.id)
+
+        self.assertEqual(result.amount.amount_minor, 3333)
+        self.assertEqual(result.amount.currency, "USD")
+        self.assertEqual(settlement.amount.amount_minor, 3333)
+        self.assertEqual(settlement.amount.currency, "USD")
+        self.assertEqual(settlement.pricing_source, "configured_policy")
+        self.assertEqual(settlement.pricing_configuration_id, config_id)
+        self.assertEqual(settlement.pricing_resolved_at, settlement.created_at)
+
+    def test_historical_settlements_preserve_each_authoritative_price(self):
+        org_id = uuid4()
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+        self.ledger_repo.save(CreditLedgerEntry(id=uuid4(), wallet_id=wallet.id, direction=CreditLedgerDirection.CREDIT, units=100, reason="Initial credit", reference="ref", created_at=datetime.now(timezone.utc)))
+        self.cost_policy.rate_callback = lambda price: 10
+
+        config_a = uuid4()
+        self.pricing_policy.amount_minor = 1000
+        self.pricing_policy.pricing_source = "configured_policy"
+        self.pricing_policy.pricing_configuration_id = config_a
+        provider_a, sr_a, opp_a, invitation_a = self._setup_base_entities(org_id=org_id)
+        self.use_case.execute(opportunity_invitation_id=invitation_a.id)
+        interest_a = self.interest_repo.get_by_invitation(invitation_a.id)
+        settlement_a = self.settlement_repo.get_by_interest(interest_a.id)
+
+        config_b = uuid4()
+        self.pricing_policy.amount_minor = 1500
+        self.pricing_policy.pricing_configuration_id = config_b
+        provider_b, sr_b, opp_b, invitation_b = self._setup_base_entities(org_id=org_id)
+        self.use_case.execute(opportunity_invitation_id=invitation_b.id)
+        interest_b = self.interest_repo.get_by_invitation(invitation_b.id)
+        settlement_b = self.settlement_repo.get_by_interest(interest_b.id)
+
+        self.assertEqual(settlement_a.amount.amount_minor, 1000)
+        self.assertEqual(settlement_a.pricing_configuration_id, config_a)
+        self.assertEqual(settlement_b.amount.amount_minor, 1500)
+        self.assertEqual(settlement_b.pricing_configuration_id, config_b)
+
     def test_already_unlocked_idempotency(self):
         org_id = uuid4()
         provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
@@ -7845,6 +7914,9 @@ class UnlockOpportunityWithCreditsTests(SimpleTestCase):
         self.access_repo.save_calls = 0
         self.interest_repo.save_calls = 0
 
+        self.pricing_policy.amount_minor = 1500
+        self.pricing_policy.call_count = 0
+
         # Execute again
         result = self.use_case.execute(opportunity_invitation_id=invitation.id)
 
@@ -7855,6 +7927,8 @@ class UnlockOpportunityWithCreditsTests(SimpleTestCase):
         # NO new mutations
         self.assertEqual(self.access_repo.save_calls, 0)
         self.assertEqual(self.interest_repo.save_calls, 0)
+        self.assertEqual(self.pricing_policy.call_count, 0)
+        self.assertEqual(self.settlement_repo.get_by_interest(interest.id).amount.amount_minor, 2500)
 
     def test_insufficient_credits(self):
         org_id = uuid4()

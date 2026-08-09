@@ -1288,6 +1288,9 @@ class SettleOpportunityWithCredits:
             method=SettlementMethod.CREDIT,
             amount=quote.amount,
             created_at=now,
+            pricing_source=quote.pricing_source or quote.reason,
+            pricing_configuration_id=quote.pricing_configuration_id,
+            pricing_resolved_at=now,
         )
 
         # Atomic persistence
@@ -1638,6 +1641,9 @@ class UnlockOpportunityWithCredits:
             method=SettlementMethod.CREDIT,
             amount=quote.amount,
             created_at=now,
+            pricing_source=quote.pricing_source or quote.reason,
+            pricing_configuration_id=quote.pricing_configuration_id,
+            pricing_resolved_at=now,
         )
 
         access = OpportunityAccess(

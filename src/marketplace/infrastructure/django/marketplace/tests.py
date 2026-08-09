@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase
 
@@ -2363,6 +2363,61 @@ class DjangoEconomicSettlementRepositoryTests(TestCase):
         self.assertIsNotNone(by_interest)
         self.assertEqual(by_interest.id, settlement.id)
 
+    def test_save_and_retrieve_pricing_snapshot_metadata(self):
+        config_id = uuid4()
+        resolved_at = datetime.now(timezone.utc)
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(amount_minor=1500, currency="USD"),
+            created_at=resolved_at,
+            pricing_source="configured_opportunity_unlock_base_price",
+            pricing_configuration_id=config_id,
+            pricing_resolved_at=resolved_at,
+        )
+
+        saved = self.settlement_repository.save(settlement)
+        retrieved = self.settlement_repository.get_by_id(saved.id)
+
+        self.assertEqual(retrieved.amount.amount_minor, 1500)
+        self.assertEqual(retrieved.amount.currency, "USD")
+        self.assertEqual(retrieved.pricing_source, "configured_opportunity_unlock_base_price")
+        self.assertEqual(retrieved.pricing_configuration_id, config_id)
+        self.assertEqual(retrieved.pricing_resolved_at, resolved_at)
+
+    def test_save_duplicate_id_does_not_rewrite_immutable_settlement(self):
+        settlement_id = uuid4()
+        created_at = datetime.now(timezone.utc)
+        original = EconomicSettlement(
+            id=settlement_id,
+            interest_id=self.interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(amount_minor=1000, currency="BRL"),
+            created_at=created_at,
+            pricing_source="configured_policy",
+            pricing_configuration_id=uuid4(),
+            pricing_resolved_at=created_at,
+        )
+        self.settlement_repository.save(original)
+
+        rewritten = EconomicSettlement(
+            id=settlement_id,
+            interest_id=self.interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(amount_minor=1500, currency="BRL"),
+            created_at=created_at,
+            pricing_source="configured_policy",
+            pricing_configuration_id=uuid4(),
+            pricing_resolved_at=created_at,
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.settlement_repository.save(rewritten)
+
+        retrieved = self.settlement_repository.get_by_id(settlement_id)
+        self.assertEqual(retrieved.amount.amount_minor, 1000)
+
     def test_one_to_one_interest_constraint(self):
         m1 = Money(amount_minor=2500, currency="BRL")
         settlement1 = EconomicSettlement(
@@ -2804,6 +2859,43 @@ class DjangoCreditSettlementAtomicWriterTests(TestCase):
         self.assertEqual(model_settlement.method, "credit")
         self.assertEqual(model_settlement.amount_minor, 2500)
 
+    def test_positive_debit_and_settlement_persist_pricing_snapshot(self):
+        now = datetime.now(timezone.utc)
+        config_id = uuid4()
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=None,
+            created_at=now,
+        )
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=self.interest_model.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=now,
+            pricing_source="configured_policy",
+            pricing_configuration_id=config_id,
+            pricing_resolved_at=now,
+        )
+
+        self.writer.persist(
+            debit_entry=debit,
+            settlement=settlement,
+            wallet_id=self.wallet.id,
+            required_units=25,
+        )
+
+        model_settlement = EconomicSettlementModel.objects.get(id=settlement.id)
+        self.assertEqual(model_settlement.amount_minor, 2500)
+        self.assertEqual(model_settlement.currency, "BRL")
+        self.assertEqual(model_settlement.pricing_source, "configured_policy")
+        self.assertEqual(model_settlement.pricing_configuration_id, config_id)
+        self.assertEqual(model_settlement.pricing_resolved_at, now)
+
     def test_zero_debit_settlement_only_persisted(self):
         now = datetime.now(timezone.utc)
         settlement = EconomicSettlement(
@@ -3015,6 +3107,56 @@ class DjangoOpportunityUnlockAtomicWriterTests(TestCase):
         self.assertEqual(EconomicSettlementModel.objects.filter(id=settlement.id).count(), 1)
         self.assertEqual(OpportunityAccessModel.objects.filter(id=access.id).count(), 1)
         self.assertEqual(OpportunityInterestModel.objects.filter(id=interest.id).count(), 1)
+
+    def test_atomic_persist_unlock_saves_pricing_snapshot(self):
+        now = datetime.now(timezone.utc)
+        config_id = uuid4()
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=self.invitation_model.id,
+            created_at=now,
+        )
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=f"opportunity-interest:{interest.id}",
+            created_at=now,
+        )
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "USD"),
+            created_at=now,
+            pricing_source="configured_policy",
+            pricing_configuration_id=config_id,
+            pricing_resolved_at=now,
+        )
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=self.opportunity_model.id,
+            provider_id=self.provider_model.id,
+            created_at=now,
+        )
+
+        self.writer.persist_unlock(
+            interest=interest,
+            debit_entry=debit,
+            settlement=settlement,
+            access=access,
+            wallet_id=self.wallet.id,
+            required_units=25,
+        )
+
+        model_settlement = EconomicSettlementModel.objects.get(id=settlement.id)
+        self.assertEqual(model_settlement.amount_minor, 2500)
+        self.assertEqual(model_settlement.currency, "USD")
+        self.assertEqual(model_settlement.pricing_source, "configured_policy")
+        self.assertEqual(model_settlement.pricing_configuration_id, config_id)
+        self.assertEqual(model_settlement.pricing_resolved_at, now)
 
     def test_atomic_rollback_on_integrity_error(self):
         now = datetime.now(timezone.utc)
@@ -3319,7 +3461,7 @@ class DjangoOpportunityUnlockPricingConfigurationRepositoryTests(TestCase):
             )
 
     def test_configured_pricing_policy_returns_active_configuration(self):
-        OpportunityUnlockPricingConfigurationModel.objects.create(
+        configuration = OpportunityUnlockPricingConfigurationModel.objects.create(
             id=uuid4(),
             scope="default",
             amount_minor=4200,
@@ -3359,6 +3501,8 @@ class DjangoOpportunityUnlockPricingConfigurationRepositoryTests(TestCase):
 
         self.assertEqual(quote.amount.amount_minor, 4200)
         self.assertEqual(quote.amount.currency, "BRL")
+        self.assertEqual(quote.pricing_source, "configured_opportunity_unlock_base_price")
+        self.assertEqual(quote.pricing_configuration_id, configuration.id)
 
     def test_configured_pricing_policy_is_unavailable_without_active_configuration(self):
         policy = ConfiguredOpportunityPricingPolicy(self.repository)

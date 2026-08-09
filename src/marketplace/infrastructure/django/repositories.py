@@ -710,20 +710,22 @@ class DjangoEconomicSettlementRepository(EconomicSettlementRepository):
                 currency=model.currency,
             ),
             created_at=model.created_at,
+            pricing_source=model.pricing_source,
+            pricing_configuration_id=model.pricing_configuration_id,
+            pricing_resolved_at=model.pricing_resolved_at,
         )
 
     def save(self, settlement: EconomicSettlement) -> EconomicSettlement:
-        # Since it is an immutable fact, we can use update_or_create to match project conventions,
-        # or standard create. Existing repositories use update_or_create. Let's stick to update_or_create.
-        model, _ = EconomicSettlementModel.objects.update_or_create(
+        model = EconomicSettlementModel.objects.create(
             id=settlement.id,
-            defaults={
-                "interest_id": settlement.interest_id,
-                "method": settlement.method.value,
-                "amount_minor": settlement.amount.amount_minor,
-                "currency": settlement.amount.currency,
-                "created_at": settlement.created_at,
-            },
+            interest_id=settlement.interest_id,
+            method=settlement.method.value,
+            amount_minor=settlement.amount.amount_minor,
+            currency=settlement.amount.currency,
+            pricing_source=settlement.pricing_source,
+            pricing_configuration_id=settlement.pricing_configuration_id,
+            pricing_resolved_at=settlement.pricing_resolved_at,
+            created_at=settlement.created_at,
         )
         return self._to_entity(model)
 
@@ -893,6 +895,9 @@ class DjangoCreditSettlementAtomicWriter(CreditSettlementAtomicWriter):
                 method=settlement.method.value,
                 amount_minor=settlement.amount.amount_minor,
                 currency=settlement.amount.currency,
+                pricing_source=settlement.pricing_source,
+                pricing_configuration_id=settlement.pricing_configuration_id,
+                pricing_resolved_at=settlement.pricing_resolved_at,
                 created_at=settlement.created_at,
             )
 
@@ -971,6 +976,9 @@ class DjangoOpportunityUnlockAtomicWriter(OpportunityUnlockAtomicWriter):
                     "method": settlement.method.value,
                     "amount_minor": settlement.amount.amount_minor,
                     "currency": settlement.amount.currency,
+                    "pricing_source": settlement.pricing_source,
+                    "pricing_configuration_id": settlement.pricing_configuration_id,
+                    "pricing_resolved_at": settlement.pricing_resolved_at,
                     "created_at": settlement.created_at,
                 }
             )
