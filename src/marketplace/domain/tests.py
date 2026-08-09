@@ -30,6 +30,7 @@ from src.marketplace.domain.entities import (
     ProtectedCommercialData,
     OpportunityPreview,
     OpportunityUnlockQuote,
+    OpportunityUnlockPricingConfiguration,
     OpportunityUnlockResult,
     UnlockedOpportunityContact,
 )
@@ -2110,3 +2111,31 @@ class UnlockedOpportunityContactDomainTests(SimpleTestCase):
         )
         with self.assertRaises(FrozenInstanceError):
             contact.requester_name = "Jane"  # type: ignore
+
+
+class OpportunityUnlockPricingConfigurationDomainTests(SimpleTestCase):
+    def test_valid_configuration_requires_positive_money(self):
+        now = datetime.now(timezone.utc)
+        config = OpportunityUnlockPricingConfiguration(
+            id=uuid4(),
+            amount=Money(amount_minor=3500, currency="BRL"),
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+        self.assertEqual(config.amount.amount_minor, 3500)
+        self.assertEqual(config.amount.currency, "BRL")
+        self.assertTrue(config.is_active)
+
+    def test_zero_or_negative_amount_rejected(self):
+        now = datetime.now(timezone.utc)
+        for amount_minor in (0, -1):
+            with self.assertRaises(ValueError):
+                OpportunityUnlockPricingConfiguration(
+                    id=uuid4(),
+                    amount=Money(amount_minor=amount_minor, currency="BRL"),
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )

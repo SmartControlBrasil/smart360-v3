@@ -31,6 +31,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     CreditWalletModel,
     CreditLedgerEntryModel,
     EconomicSettlementModel,
+    OpportunityUnlockPricingConfigurationModel,
     OpportunityContactReadAuditModel,
 )
 from src.marketplace.infrastructure.policies import (
@@ -404,6 +405,95 @@ class MarketplaceHTTPDeliveryBoundaryTests(TestCase):
         self.assertTrue(data["quote_available"])
         self.assertEqual(data["amount"], {"amount_minor": 2500, "currency": "BRL"})
 
+    def test_quote_with_active_persisted_pricing_configuration(self):
+        OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=3700,
+            currency="BRL",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+        self.client.force_login(self.user_a)
+        url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+        res = self.client.get(url)
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data["quote_available"])
+        self.assertEqual(data["amount"], {"amount_minor": 3700, "currency": "BRL"})
+        self.assertFalse(data["already_unlocked"])
+
+    def test_quote_with_inactive_persisted_pricing_configuration_is_unavailable(self):
+        OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=3700,
+            currency="BRL",
+            is_active=False,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+        self.client.force_login(self.user_a)
+        url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+        res = self.client.get(url)
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertFalse(data["quote_available"])
+        self.assertIsNone(data["amount"])
+
+    def test_quote_with_same_configuration_is_deterministic(self):
+        OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=3700,
+            currency="BRL",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+        self.client.force_login(self.user_a)
+        url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+
+        first = self.client.get(url).json()
+        second = self.client.get(url).json()
+
+        self.assertEqual(first["amount"], second["amount"])
+        self.assertEqual(first["quote_available"], second["quote_available"])
+        self.assertEqual(first["reason"], second["reason"])
+
+    def test_quote_already_unlocked_preserves_existing_semantics_with_configuration(self):
+        OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=3700,
+            currency="BRL",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        OpportunityAccessModel.objects.create(
+            id=uuid4(),
+            opportunity_id=self.opportunity.id,
+            provider_id=self.provider_a.id,
+            created_at=self.now,
+        )
+
+        self.client.force_login(self.user_a)
+        url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+        res = self.client.get(url)
+
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data["already_unlocked"])
+        self.assertFalse(data["quote_available"])
+        self.assertIsNone(data["amount"])
+
     def test_quote_exact_allowlist(self):
         self.client.force_login(self.user_a)
         url = reverse("marketplace:quote", kwargs={"opportunity_invitation_id": self.invitation_a.id})
@@ -482,6 +572,26 @@ class MarketplaceHTTPDeliveryBoundaryTests(TestCase):
                 provider_id=self.provider_a.id,
             ).exists()
         )
+
+    def test_unlock_ignores_client_controlled_amount(self):
+        url = reverse("marketplace:unlock", kwargs={"opportunity_invitation_id": self.invitation_a.id})
+        req = self.factory.post(
+            url,
+            data={"amount": {"amount_minor": 1, "currency": "BRL"}},
+            content_type="application/json",
+        )
+        req.user = self.user_a
+        req._marketplace_service = self.service_with_pricing
+
+        res = views.unlock_opportunity_view(req, opportunity_invitation_id=self.invitation_a.id)
+
+        self.assertEqual(res.status_code, 200)
+        import json
+        data = json.loads(res.content)
+        self.assertEqual(data["amount"], {"amount_minor": 2500, "currency": "BRL"})
+        settlement = EconomicSettlementModel.objects.get(id=data["settlement_id"])
+        self.assertEqual(settlement.amount_minor, 2500)
+        self.assertEqual(settlement.currency, "BRL")
 
     def test_unlock_retry_idempotent_no_double_charge(self):
         url = reverse("marketplace:unlock", kwargs={"opportunity_invitation_id": self.invitation_a.id})

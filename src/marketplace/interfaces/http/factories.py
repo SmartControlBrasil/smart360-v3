@@ -21,10 +21,11 @@ from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityUnlockAtomicWriter,
     DjangoOrganizationMemberProviderResolver,
     DjangoProtectedDataReadAuditWriter,
+    DjangoOpportunityUnlockPricingConfigurationRepository,
 )
 from src.marketplace.infrastructure.policies import (
-    UnconfiguredOpportunityPricingPolicy,
     UnconfiguredCreditCostPolicy,
+    ConfiguredOpportunityPricingPolicy,
 )
 
 
@@ -48,8 +49,11 @@ def build_authenticated_provider_marketplace_service(
     ledger_repo = DjangoCreditLedgerEntryRepository()
     unlock_atomic_writer = DjangoOpportunityUnlockAtomicWriter()
     resolver = DjangoOrganizationMemberProviderResolver()
+    pricing_configuration_repo = DjangoOpportunityUnlockPricingConfigurationRepository()
 
-    actual_pricing_policy = pricing_policy or UnconfiguredOpportunityPricingPolicy()
+    actual_pricing_policy = pricing_policy or ConfiguredOpportunityPricingPolicy(
+        pricing_configuration_repo
+    )
     actual_cost_policy = credit_cost_policy or UnconfiguredCreditCostPolicy()
 
     get_preview = GetOpportunityPreview(

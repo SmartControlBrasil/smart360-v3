@@ -16,6 +16,7 @@ from src.marketplace.application.ports import (
     CreditSettlementAtomicWriter,
     OpportunityUnlockAtomicWriter,
     ProtectedDataReadAuditWriter,
+    OpportunityUnlockPricingConfigurationRepository,
 )
 from src.marketplace.application.use_cases import (
     AmbiguousProviderIdentity,
@@ -41,6 +42,7 @@ from src.marketplace.domain.entities import (
     CreditLedgerEntry,
     ProviderOpportunityInboxItem,
     ProviderUnlockedOpportunityItem,
+    OpportunityUnlockPricingConfiguration,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -56,6 +58,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     CreditWalletModel,
     CreditLedgerEntryModel,
     OpportunityContactReadAuditModel,
+    OpportunityUnlockPricingConfigurationModel,
 )
 from src.memberships.infrastructure.django.memberships.models import MembershipModel
 
@@ -773,6 +776,33 @@ class DjangoCreditWalletRepository(CreditWalletRepository):
         try:
             model = CreditWalletModel.objects.get(organization_id=organization_id)
         except CreditWalletModel.DoesNotExist:
+            return None
+        return self._to_entity(model)
+
+
+class DjangoOpportunityUnlockPricingConfigurationRepository(OpportunityUnlockPricingConfigurationRepository):
+    DEFAULT_SCOPE = "default"
+
+    @staticmethod
+    def _to_entity(model: OpportunityUnlockPricingConfigurationModel) -> OpportunityUnlockPricingConfiguration:
+        return OpportunityUnlockPricingConfiguration(
+            id=model.id,
+            amount=Money(
+                amount_minor=model.amount_minor,
+                currency=model.currency,
+            ),
+            is_active=model.is_active,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    def get_active_default(self) -> OpportunityUnlockPricingConfiguration | None:
+        try:
+            model = OpportunityUnlockPricingConfigurationModel.objects.get(
+                scope=self.DEFAULT_SCOPE,
+                is_active=True,
+            )
+        except OpportunityUnlockPricingConfigurationModel.DoesNotExist:
             return None
         return self._to_entity(model)
 

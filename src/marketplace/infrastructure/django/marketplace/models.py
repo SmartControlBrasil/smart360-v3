@@ -377,6 +377,35 @@ class CreditLedgerEntryModel(models.Model):
         ]
 
 
+class OpportunityUnlockPricingConfigurationModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    scope = models.SlugField(max_length=50, unique=True)
+    amount_minor = models.BigIntegerField()
+    currency = models.CharField(max_length=3)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_opportunity_unlock_pricing_configurations"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_minor__gt=0),
+                name="mkt_unlock_price_amount_gt_zero",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["scope", "is_active"],
+                name="mkt_unl_price_scope_act",
+            ),
+        ]
+
+
 class OpportunityContactReadAuditModel(models.Model):
     id = models.UUIDField(
         primary_key=True,

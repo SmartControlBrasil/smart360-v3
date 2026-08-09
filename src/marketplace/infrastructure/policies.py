@@ -1,4 +1,8 @@
-from src.marketplace.application.ports import OpportunityPricingPolicy, CreditCostPolicy
+from src.marketplace.application.ports import (
+    OpportunityPricingPolicy,
+    CreditCostPolicy,
+    OpportunityUnlockPricingConfigurationRepository,
+)
 from src.marketplace.domain.entities import (
     Money,
     OpportunityPricingQuote,
@@ -45,3 +49,29 @@ class UnconfiguredCreditCostPolicy(CreditCostPolicy):
         provider: Provider,
     ) -> int:
         raise ValueError("No commercial credit cost conversion policy configured.")
+
+
+class ConfiguredOpportunityPricingPolicy(OpportunityPricingPolicy):
+    def __init__(
+        self,
+        configuration_repository: OpportunityUnlockPricingConfigurationRepository,
+    ):
+        self.configuration_repository = configuration_repository
+
+    def quote(
+        self,
+        *,
+        interest: OpportunityInterest | None = None,
+        invitation: OpportunityInvitation,
+        opportunity: Opportunity,
+        provider: Provider,
+    ) -> OpportunityPricingQuote:
+        configuration = self.configuration_repository.get_active_default()
+        if configuration is None:
+            raise OpportunityPricingUnavailable(
+                "No active opportunity unlock pricing configuration."
+            )
+        return OpportunityPricingQuote(
+            amount=configuration.amount,
+            reason="configured_opportunity_unlock_base_price",
+        )

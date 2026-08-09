@@ -23,6 +23,7 @@ from src.marketplace.domain.entities import (
     CreditWallet,
     CreditLedgerDirection,
     CreditLedgerEntry,
+    OpportunityPricingUnavailable,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -38,6 +39,7 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     CreditWalletModel,
     CreditLedgerEntryModel,
     OpportunityContactReadAuditModel,
+    OpportunityUnlockPricingConfigurationModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoEconomicSettlementRepository,
@@ -57,10 +59,12 @@ from src.marketplace.infrastructure.django.repositories import (
     DjangoServiceRepository,
     DjangoServiceCategoryRepository,
     DjangoProtectedDataReadAuditWriter,
+    DjangoOpportunityUnlockPricingConfigurationRepository,
 )
 from src.organizations.infrastructure.django.organizations.models import (
     OrganizationModel,
 )
+from src.marketplace.infrastructure.policies import ConfiguredOpportunityPricingPolicy
 
 
 class DjangoServiceCategoryRepositoryTests(TestCase):
@@ -3264,3 +3268,125 @@ class DjangoOrganizationMemberProviderResolverTests(TestCase):
         """Completely unknown UUID raises ProviderIdentityNotFound."""
         with self.assertRaises(ProviderIdentityNotFound):
             self.resolver.resolve(authenticated_user_id=uuid4())
+
+
+class DjangoOpportunityUnlockPricingConfigurationRepositoryTests(TestCase):
+    def setUp(self):
+        self.repository = DjangoOpportunityUnlockPricingConfigurationRepository()
+        self.now = datetime.now(timezone.utc)
+
+    def test_get_active_default_returns_configured_money(self):
+        model = OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=3700,
+            currency="BRL",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+        config = self.repository.get_active_default()
+
+        self.assertIsNotNone(config)
+        self.assertEqual(config.id, model.id)
+        self.assertEqual(config.amount.amount_minor, 3700)
+        self.assertEqual(config.amount.currency, "BRL")
+
+    def test_get_active_default_returns_none_without_active_configuration(self):
+        OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=3700,
+            currency="BRL",
+            is_active=False,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+        self.assertIsNone(self.repository.get_active_default())
+
+    def test_zero_amount_rejected_by_database_constraint(self):
+        with self.assertRaises(IntegrityError):
+            OpportunityUnlockPricingConfigurationModel.objects.create(
+                id=uuid4(),
+                scope="default",
+                amount_minor=0,
+                currency="BRL",
+                is_active=True,
+                created_at=self.now,
+                updated_at=self.now,
+            )
+
+    def test_configured_pricing_policy_returns_active_configuration(self):
+        OpportunityUnlockPricingConfigurationModel.objects.create(
+            id=uuid4(),
+            scope="default",
+            amount_minor=4200,
+            currency="BRL",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        policy = ConfiguredOpportunityPricingPolicy(self.repository)
+
+        quote = policy.quote(
+            invitation=OpportunityInvitation(
+                id=uuid4(),
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                created_at=self.now,
+            ),
+            opportunity=Opportunity(
+                id=uuid4(),
+                service_request_id=uuid4(),
+                status=OpportunityStatus.OPEN,
+                max_accesses=3,
+                created_at=self.now,
+                updated_at=self.now,
+            ),
+            provider=Provider(
+                id=uuid4(),
+                organization_id=uuid4(),
+                display_name="Provider",
+                slug="provider",
+                description="",
+                is_active=True,
+                created_at=self.now,
+                updated_at=self.now,
+            ),
+        )
+
+        self.assertEqual(quote.amount.amount_minor, 4200)
+        self.assertEqual(quote.amount.currency, "BRL")
+
+    def test_configured_pricing_policy_is_unavailable_without_active_configuration(self):
+        policy = ConfiguredOpportunityPricingPolicy(self.repository)
+
+        with self.assertRaises(OpportunityPricingUnavailable):
+            policy.quote(
+                invitation=OpportunityInvitation(
+                    id=uuid4(),
+                    opportunity_id=uuid4(),
+                    provider_id=uuid4(),
+                    created_at=self.now,
+                ),
+                opportunity=Opportunity(
+                    id=uuid4(),
+                    service_request_id=uuid4(),
+                    status=OpportunityStatus.OPEN,
+                    max_accesses=3,
+                    created_at=self.now,
+                    updated_at=self.now,
+                ),
+                provider=Provider(
+                    id=uuid4(),
+                    organization_id=uuid4(),
+                    display_name="Provider",
+                    slug="provider",
+                    description="",
+                    is_active=True,
+                    created_at=self.now,
+                    updated_at=self.now,
+                ),
+            )

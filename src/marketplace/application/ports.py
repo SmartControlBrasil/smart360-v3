@@ -15,6 +15,7 @@ from src.marketplace.domain.entities import (
     ServiceRequest,
     AccessEntitlementDecision,
     OpportunityPricingQuote,
+    OpportunityUnlockPricingConfiguration,
     EconomicSettlement,
     CreditWallet,
     CreditLedgerEntry,
@@ -305,6 +306,11 @@ class OpportunityPricingPolicy(Protocol):
         opportunity: Opportunity,
         provider: Provider,
     ) -> OpportunityPricingQuote:
+        ...
+
+
+class OpportunityUnlockPricingConfigurationRepository(Protocol):
+    def get_active_default(self) -> OpportunityUnlockPricingConfiguration | None:
         ...
 
 

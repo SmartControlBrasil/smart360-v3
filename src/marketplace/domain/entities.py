@@ -499,6 +499,35 @@ class OpportunityPricingUnavailable(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class OpportunityUnlockPricingConfiguration:
+    id: UUID
+    amount: Money
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.id is None or not isinstance(self.id, UUID):
+            raise ValueError("OpportunityUnlockPricingConfiguration id must be a UUID instance.")
+        if self.amount is None or not isinstance(self.amount, Money):
+            raise ValueError("OpportunityUnlockPricingConfiguration amount must be a Money instance.")
+        if self.amount.amount_minor <= 0:
+            raise ValueError("OpportunityUnlockPricingConfiguration amount must be greater than zero.")
+        if self.is_active is None or not isinstance(self.is_active, bool):
+            raise ValueError("OpportunityUnlockPricingConfiguration is_active must be a boolean.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("OpportunityUnlockPricingConfiguration created_at must be a datetime instance.")
+        if self.created_at.tzinfo is None:
+            raise ValueError("OpportunityUnlockPricingConfiguration created_at must be timezone-aware.")
+        if self.updated_at is None or not isinstance(self.updated_at, datetime):
+            raise ValueError("OpportunityUnlockPricingConfiguration updated_at must be a datetime instance.")
+        if self.updated_at.tzinfo is None:
+            raise ValueError("OpportunityUnlockPricingConfiguration updated_at must be timezone-aware.")
+        if self.updated_at < self.created_at:
+            raise ValueError("OpportunityUnlockPricingConfiguration updated_at cannot be before created_at.")
+
+
+@dataclass(frozen=True, slots=True)
 class OpportunityUnlockQuote:
     opportunity_id: UUID
     provider_id: UUID
