@@ -1,6 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
+
 from src.marketplace.domain.entities import (
     MatchingResult,
     Opportunity,
@@ -18,6 +19,10 @@ from src.marketplace.domain.entities import (
     CreditWallet,
     CreditLedgerEntry,
     Money,
+    OpportunityStatus,
+    ProviderOpportunityInboxItem,
+    ProviderUnlockedOpportunityItem,
+    ProviderUnlockedOpportunityPage,
 )
 
 
@@ -184,6 +189,15 @@ class OpportunityAccessRepository(Protocol):
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         ...
 
+    def list_unlocked_items_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[ProviderUnlockedOpportunityItem], int]:
+        ...
+
 
 class MatchingPolicy(Protocol):
     def evaluate(
@@ -227,6 +241,25 @@ class OpportunityInvitationRepository(Protocol):
     ) -> list[OpportunityInvitation]:
         ...
 
+    def list_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[OpportunityInvitation], int]:
+        ...
+
+    def list_inbox_items_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        status: OpportunityStatus | None = None,
+    ) -> tuple[list[ProviderOpportunityInboxItem], int]:
+        ...
+
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         ...
 
@@ -267,7 +300,7 @@ class OpportunityPricingPolicy(Protocol):
     def quote(
         self,
         *,
-        interest: OpportunityInterest,
+        interest: OpportunityInterest | None = None,
         invitation: OpportunityInvitation,
         opportunity: Opportunity,
         provider: Provider,
@@ -356,5 +389,52 @@ class CreditSettlementAtomicWriter(Protocol):
         settlement: EconomicSettlement,
         wallet_id: UUID,
         required_units: int,
+    ) -> None:
+        ...
+
+
+class OpportunityUnlockAtomicWriter(Protocol):
+    def persist_unlock(
+        self,
+        *,
+        interest: OpportunityInterest,
+        debit_entry: CreditLedgerEntry | None,
+        settlement: EconomicSettlement,
+        access: OpportunityAccess,
+        wallet_id: UUID,
+        required_units: int,
+    ) -> None:
+        ...
+
+
+class ProviderIdentityResolver(Protocol):
+    """
+    Application port for resolving an authenticated user's Provider identity.
+
+    Implementations live in infrastructure; application and domain remain
+    framework-free.
+
+    Raises:
+        ProviderIdentityNotFound: if the user has no active provider mapping.
+        AmbiguousProviderIdentity: if resolution would be ambiguous.
+        RuntimeError: propagated for unexpected infrastructure failures.
+    """
+
+    def resolve(
+        self,
+        *,
+        authenticated_user_id: UUID,
+    ) -> Provider:
+        ...
+
+
+class ProtectedDataReadAuditWriter(Protocol):
+    def record_contact_read(
+        self,
+        *,
+        authenticated_user_id: UUID,
+        provider_id: UUID,
+        opportunity_id: UUID,
+        service_request_id: UUID,
     ) -> None:
         ...

@@ -308,6 +308,42 @@ class OpportunityAccess:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class OpportunityPreview:
+    opportunity_id: UUID
+    service_request_id: UUID
+    service_id: UUID
+    title: str
+    description: str
+    status: OpportunityStatus
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("opportunity_id must be a UUID instance.")
+        if self.service_request_id is None or not isinstance(self.service_request_id, UUID):
+            raise ValueError("service_request_id must be a UUID instance.")
+        if self.service_id is None or not isinstance(self.service_id, UUID):
+            raise ValueError("service_id must be a UUID instance.")
+        if self.title is None or not isinstance(self.title, str):
+            raise ValueError("title must be a string.")
+        if self.description is None or not isinstance(self.description, str):
+            raise ValueError("description must be a string.")
+        if self.status is None or not isinstance(self.status, OpportunityStatus):
+            raise ValueError("status must be an OpportunityStatus instance.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("created_at must be a datetime instance.")
+
+        normalized_title = self.title.strip()
+        normalized_description = self.description.strip()
+
+        if not normalized_title:
+            raise ValueError("title cannot be empty.")
+
+        object.__setattr__(self, "title", normalized_title)
+        object.__setattr__(self, "description", normalized_description)
+
+
 @dataclass(slots=True, frozen=True)
 class MatchingResult:
     provider: Provider
@@ -456,6 +492,43 @@ class OpportunityPricingQuote:
             raise ValueError("OpportunityPricingQuote reason cannot be empty.")
 
         object.__setattr__(self, "reason", normalized_reason)
+
+
+class OpportunityPricingUnavailable(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityUnlockQuote:
+    opportunity_id: UUID
+    provider_id: UUID
+    amount: Money | None
+    quote_available: bool
+    already_unlocked: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("opportunity_id must be a UUID instance.")
+        if self.provider_id is None or not isinstance(self.provider_id, UUID):
+            raise ValueError("provider_id must be a UUID instance.")
+        if self.amount is not None and not isinstance(self.amount, Money):
+            raise ValueError("amount must be a Money instance or None.")
+        if not isinstance(self.quote_available, bool):
+            raise ValueError("quote_available must be a boolean.")
+        if not isinstance(self.already_unlocked, bool):
+            raise ValueError("already_unlocked must be a boolean.")
+        if self.reason is None or not isinstance(self.reason, str):
+            raise ValueError("reason must be a string.")
+
+        normalized_reason = self.reason.strip()
+        if not normalized_reason:
+            raise ValueError("reason cannot be empty.")
+
+        object.__setattr__(self, "reason", normalized_reason)
+
+        if self.amount is not None and self.amount.amount_minor < 0:
+            raise ValueError("amount cannot be negative.")
 
 
 class SettlementMethod(StrEnum):
@@ -612,3 +685,137 @@ class CreditSettlementResult:
             raise ValueError("settlement must be an EconomicSettlement instance.")
         if self.settlement.method is not SettlementMethod.CREDIT:
             raise ValueError("settlement method must be CREDIT.")
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityUnlockResult:
+    access: OpportunityAccess
+    already_unlocked: bool
+    settlement_id: UUID | None
+    amount: Money | None
+
+    def __post_init__(self) -> None:
+        if self.access is None or not isinstance(self.access, OpportunityAccess):
+            raise ValueError("access must be an OpportunityAccess instance.")
+        if self.already_unlocked is None or not isinstance(self.already_unlocked, bool):
+            raise ValueError("already_unlocked must be a boolean.")
+        if self.settlement_id is not None and not isinstance(self.settlement_id, UUID):
+            raise ValueError("settlement_id must be a UUID instance or None.")
+        if self.amount is not None and not isinstance(self.amount, Money):
+            raise ValueError("amount must be a Money instance or None.")
+
+
+@dataclass(frozen=True, slots=True)
+class UnlockedOpportunityContact:
+    opportunity_id: UUID
+    service_request_id: UUID
+    requester_name: str
+    requester_email: str
+    requester_phone: str
+
+    def __post_init__(self) -> None:
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("opportunity_id must be a UUID instance.")
+        if self.service_request_id is None or not isinstance(self.service_request_id, UUID):
+            raise ValueError("service_request_id must be a UUID instance.")
+        if self.requester_name is None or not isinstance(self.requester_name, str):
+            raise ValueError("requester_name must be a string.")
+        if self.requester_email is None or not isinstance(self.requester_email, str):
+            raise ValueError("requester_email must be a string.")
+        if self.requester_phone is None or not isinstance(self.requester_phone, str):
+            raise ValueError("requester_phone must be a string.")
+
+        object.__setattr__(self, "requester_name", self.requester_name.strip())
+        object.__setattr__(self, "requester_email", self.requester_email.strip())
+        object.__setattr__(self, "requester_phone", self.requester_phone.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderOpportunityInboxItem:
+    invitation_id: UUID
+    opportunity_id: UUID
+    service_request_id: UUID
+    service_id: UUID
+    title: str
+    description: str
+    status: OpportunityStatus
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.invitation_id is None or not isinstance(self.invitation_id, UUID):
+            raise ValueError("invitation_id must be a UUID instance.")
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("opportunity_id must be a UUID instance.")
+        if self.service_request_id is None or not isinstance(self.service_request_id, UUID):
+            raise ValueError("service_request_id must be a UUID instance.")
+        if self.service_id is None or not isinstance(self.service_id, UUID):
+            raise ValueError("service_id must be a UUID instance.")
+        if self.title is None or not isinstance(self.title, str):
+            raise ValueError("title must be a string.")
+        if self.description is None or not isinstance(self.description, str):
+            raise ValueError("description must be a string.")
+        if self.status is None or not isinstance(self.status, OpportunityStatus):
+            raise ValueError("status must be an OpportunityStatus instance.")
+        if self.created_at is None or not isinstance(self.created_at, datetime):
+            raise ValueError("created_at must be a datetime instance.")
+
+        normalized_title = self.title.strip()
+        normalized_description = self.description.strip()
+        if not normalized_title:
+            raise ValueError("title cannot be empty.")
+
+        object.__setattr__(self, "title", normalized_title)
+        object.__setattr__(self, "description", normalized_description)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderOpportunityInboxPage:
+    items: list[ProviderOpportunityInboxItem]
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUnlockedOpportunityItem:
+    opportunity_id: UUID
+    service_request_id: UUID
+    service_id: UUID
+    title: str
+    description: str
+    status: OpportunityStatus
+    unlocked_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.opportunity_id is None or not isinstance(self.opportunity_id, UUID):
+            raise ValueError("opportunity_id must be a UUID instance.")
+        if self.service_request_id is None or not isinstance(self.service_request_id, UUID):
+            raise ValueError("service_request_id must be a UUID instance.")
+        if self.service_id is None or not isinstance(self.service_id, UUID):
+            raise ValueError("service_id must be a UUID instance.")
+        if self.title is None or not isinstance(self.title, str):
+            raise ValueError("title must be a string.")
+        if self.description is None or not isinstance(self.description, str):
+            raise ValueError("description must be a string.")
+        if self.status is None or not isinstance(self.status, OpportunityStatus):
+            raise ValueError("status must be an OpportunityStatus instance.")
+        if self.unlocked_at is None or not isinstance(self.unlocked_at, datetime):
+            raise ValueError("unlocked_at must be a datetime instance.")
+
+        normalized_title = self.title.strip()
+        normalized_description = self.description.strip()
+        if not normalized_title:
+            raise ValueError("title cannot be empty.")
+
+        object.__setattr__(self, "title", normalized_title)
+        object.__setattr__(self, "description", normalized_description)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUnlockedOpportunityPage:
+    items: list[ProviderUnlockedOpportunityItem]
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int

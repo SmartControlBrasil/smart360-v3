@@ -375,3 +375,30 @@ class CreditLedgerEntryModel(models.Model):
                 name="mkt_credit_ledger_units_gt_zero",
             )
         ]
+
+
+class OpportunityContactReadAuditModel(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    authenticated_user_id = models.UUIDField()
+    provider_id = models.UUIDField()
+    opportunity_id = models.UUIDField()
+    service_request_id = models.UUIDField()
+    action = models.CharField(max_length=100)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "marketplace_opportunity_contact_read_audits"
+        indexes = [
+            models.Index(
+                fields=["provider_id", "created_at"],
+                name="mkt_opp_cr_prov_idx",
+            ),
+            models.Index(
+                fields=["opportunity_id", "created_at"],
+                name="mkt_opp_cr_opp_idx",
+            ),
+        ]

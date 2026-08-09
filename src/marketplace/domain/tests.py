@@ -28,6 +28,10 @@ from src.marketplace.domain.entities import (
     CreditLedgerEntry,
     CreditSettlementResult,
     ProtectedCommercialData,
+    OpportunityPreview,
+    OpportunityUnlockQuote,
+    OpportunityUnlockResult,
+    UnlockedOpportunityContact,
 )
 
 
@@ -1859,3 +1863,250 @@ class CreditSettlementResultTests(SimpleTestCase):
 
     def test_credit_method_value_is_exactly_credit(self):
         self.assertEqual(SettlementMethod.CREDIT.value, "credit")
+
+
+class OpportunityPreviewDomainTests(SimpleTestCase):
+    def test_valid_opportunity_preview_creation(self):
+        opportunity_id = uuid4()
+        service_request_id = uuid4()
+        service_id = uuid4()
+        now = datetime.now(timezone.utc)
+
+        preview = OpportunityPreview(
+            opportunity_id=opportunity_id,
+            service_request_id=service_request_id,
+            service_id=service_id,
+            title="  CLP Manutencao  ",
+            description="  CLP parou  ",
+            status=OpportunityStatus.OPEN,
+            created_at=now,
+        )
+
+        self.assertEqual(preview.opportunity_id, opportunity_id)
+        self.assertEqual(preview.service_request_id, service_request_id)
+        self.assertEqual(preview.service_id, service_id)
+        self.assertEqual(preview.title, "CLP Manutencao")
+        self.assertEqual(preview.description, "CLP parou")
+        self.assertEqual(preview.status, OpportunityStatus.OPEN)
+        self.assertEqual(preview.created_at, now)
+
+    def test_opportunity_preview_excludes_pii(self):
+        preview = OpportunityPreview(
+            opportunity_id=uuid4(),
+            service_request_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="Desc",
+            status=OpportunityStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.assertFalse(hasattr(preview, "requester_name"))
+        self.assertFalse(hasattr(preview, "requester_email"))
+        self.assertFalse(hasattr(preview, "requester_phone"))
+
+    def test_opportunity_preview_invalid_title(self):
+        with self.assertRaises(ValueError):
+            OpportunityPreview(
+                opportunity_id=uuid4(),
+                service_request_id=uuid4(),
+                service_id=uuid4(),
+                title="   ",
+                description="Desc",
+                status=OpportunityStatus.OPEN,
+                created_at=datetime.now(timezone.utc),
+            )
+
+    def test_opportunity_preview_immutability(self):
+        preview = OpportunityPreview(
+            opportunity_id=uuid4(),
+            service_request_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="Desc",
+            status=OpportunityStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+        )
+        with self.assertRaises(FrozenInstanceError):
+            preview.title = "New Title"  # type: ignore
+
+
+class OpportunityUnlockQuoteDomainTests(SimpleTestCase):
+    def test_valid_opportunity_unlock_quote_creation(self):
+        opportunity_id = uuid4()
+        provider_id = uuid4()
+        price = Money(2500, "BRL")
+
+        quote = OpportunityUnlockQuote(
+            opportunity_id=opportunity_id,
+            provider_id=provider_id,
+            amount=price,
+            quote_available=True,
+            already_unlocked=False,
+            reason="   Quote generated successfully  ",
+        )
+
+        self.assertEqual(quote.opportunity_id, opportunity_id)
+        self.assertEqual(quote.provider_id, provider_id)
+        self.assertEqual(quote.amount, price)
+        self.assertTrue(quote.quote_available)
+        self.assertFalse(quote.already_unlocked)
+        self.assertEqual(quote.reason, "Quote generated successfully")
+
+    def test_quote_unavailable_scenario(self):
+        quote = OpportunityUnlockQuote(
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            amount=None,
+            quote_available=False,
+            already_unlocked=False,
+            reason="No commercial pricing configured",
+        )
+        self.assertIsNone(quote.amount)
+        self.assertFalse(quote.quote_available)
+
+    def test_negative_amount_not_allowed(self):
+        with self.assertRaises(ValueError):
+            OpportunityUnlockQuote(
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                amount=Money(-100, "BRL"),
+                quote_available=True,
+                already_unlocked=False,
+                reason="Invalid negative price",
+            )
+
+    def test_reason_empty_not_allowed(self):
+        with self.assertRaises(ValueError):
+            OpportunityUnlockQuote(
+                opportunity_id=uuid4(),
+                provider_id=uuid4(),
+                amount=None,
+                quote_available=False,
+                already_unlocked=False,
+                reason="   ",
+            )
+
+    def test_quote_excludes_pii(self):
+        quote = OpportunityUnlockQuote(
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            amount=None,
+            quote_available=False,
+            already_unlocked=False,
+            reason="Safe Reason",
+        )
+        self.assertFalse(hasattr(quote, "requester_name"))
+        self.assertFalse(hasattr(quote, "requester_email"))
+        self.assertFalse(hasattr(quote, "requester_phone"))
+
+    def test_quote_immutability(self):
+        quote = OpportunityUnlockQuote(
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            amount=None,
+            quote_available=False,
+            already_unlocked=False,
+            reason="Safe Reason",
+        )
+        with self.assertRaises(FrozenInstanceError):
+            quote.reason = "Mutated"  # type: ignore
+
+
+class OpportunityUnlockResultDomainTests(SimpleTestCase):
+    def test_valid_opportunity_unlock_result_creation(self):
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=datetime.now(timezone.utc),
+        )
+        settlement_id = uuid4()
+        price = Money(2500, "BRL")
+
+        result = OpportunityUnlockResult(
+            access=access,
+            already_unlocked=False,
+            settlement_id=settlement_id,
+            amount=price,
+        )
+
+        self.assertEqual(result.access, access)
+        self.assertFalse(result.already_unlocked)
+        self.assertEqual(result.settlement_id, settlement_id)
+        self.assertEqual(result.amount, price)
+
+    def test_quote_excludes_pii(self):
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=uuid4(),
+            provider_id=uuid4(),
+            created_at=datetime.now(timezone.utc),
+        )
+        result = OpportunityUnlockResult(
+            access=access,
+            already_unlocked=False,
+            settlement_id=None,
+            amount=None,
+        )
+        self.assertFalse(hasattr(result, "requester_name"))
+        self.assertFalse(hasattr(result, "requester_email"))
+        self.assertFalse(hasattr(result, "requester_phone"))
+
+
+class UnlockedOpportunityContactDomainTests(SimpleTestCase):
+    def test_valid_unlocked_opportunity_contact_creation(self):
+        opp_id = uuid4()
+        sr_id = uuid4()
+        contact = UnlockedOpportunityContact(
+            opportunity_id=opp_id,
+            service_request_id=sr_id,
+            requester_name="  John Doe  ",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+
+        self.assertEqual(contact.opportunity_id, opp_id)
+        self.assertEqual(contact.service_request_id, sr_id)
+        self.assertEqual(contact.requester_name, "John Doe")
+        self.assertEqual(contact.requester_email, "john@example.com")
+        self.assertEqual(contact.requester_phone, "+5511999999999")
+
+    def test_tolerates_blank_legacy_values(self):
+        # Ensure we can create contact with blank fields for legacy compatibility
+        contact = UnlockedOpportunityContact(
+            opportunity_id=uuid4(),
+            service_request_id=uuid4(),
+            requester_name="",
+            requester_email="",
+            requester_phone="",
+        )
+        self.assertEqual(contact.requester_name, "")
+        self.assertEqual(contact.requester_email, "")
+        self.assertEqual(contact.requester_phone, "")
+
+    def test_allowlist_regression(self):
+        contact = UnlockedOpportunityContact(
+            opportunity_id=uuid4(),
+            service_request_id=uuid4(),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        # Structural check of fields
+        from dataclasses import fields
+        field_names = {f.name for f in fields(contact)}
+        self.assertEqual(
+            field_names,
+            {"opportunity_id", "service_request_id", "requester_name", "requester_email", "requester_phone"}
+        )
+
+    def test_immutability(self):
+        contact = UnlockedOpportunityContact(
+            opportunity_id=uuid4(),
+            service_request_id=uuid4(),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        with self.assertRaises(FrozenInstanceError):
+            contact.requester_name = "Jane"  # type: ignore

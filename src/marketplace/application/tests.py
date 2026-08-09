@@ -27,6 +27,10 @@ from src.marketplace.application.use_cases import (
     SettlementAwareAccessEntitlementPolicy,
     RankCandidates,
     GetProtectedCommercialData,
+    GetOpportunityPreview,
+    GetOpportunityUnlockQuote,
+    UnlockOpportunityWithCredits,
+    GetUnlockedOpportunityContact,
 )
 from src.marketplace.domain.entities import (
     MatchingResult,
@@ -52,10 +56,19 @@ from src.marketplace.domain.entities import (
     CreditLedgerEntry,
     CreditSettlementResult,
     ProtectedCommercialData,
+    OpportunityPreview,
+    OpportunityUnlockQuote,
+    OpportunityPricingUnavailable,
+    OpportunityUnlockResult,
+    UnlockedOpportunityContact,
+    ProviderOpportunityInboxItem,
+    ProviderUnlockedOpportunityItem,
+    ProviderUnlockedOpportunityPage,
 )
 from src.marketplace.application.ports import (
     CreditCostPolicy,
     CreditSettlementAtomicWriter,
+    OpportunityUnlockAtomicWriter,
 )
 from src.organizations.domain.entities import Organization
 
@@ -812,10 +825,12 @@ class InMemoryOpportunityRepository:
 
 
 class InMemoryOpportunityAccessRepository:
-    def __init__(self):
+    def __init__(self, opportunity_repo=None, service_request_repo=None):
         self._items: dict[str, OpportunityAccess] = {}
         self.save_calls = 0
         self.last_saved: OpportunityAccess | None = None
+        self.opportunity_repo = opportunity_repo
+        self.service_request_repo = service_request_repo
 
     def save(self, access: OpportunityAccess) -> OpportunityAccess:
         self.save_calls += 1
@@ -862,12 +877,51 @@ class InMemoryOpportunityAccessRepository:
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         return len(self.list_by_opportunity(opportunity_id))
 
+    def list_unlocked_items_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[ProviderUnlockedOpportunityItem], int]:
+        all_accesses = [
+            item for item in self._items.values() if item.provider_id == provider_id
+        ]
+        all_accesses.sort(key=lambda x: (x.created_at, str(x.id)), reverse=True)
+
+        items: list[ProviderUnlockedOpportunityItem] = []
+        for acc in all_accesses:
+            if self.opportunity_repo and self.service_request_repo:
+                opp = self.opportunity_repo.get_by_id(acc.opportunity_id)
+                if not opp:
+                    continue
+                sr = self.service_request_repo.get_by_id(opp.service_request_id)
+                if not sr:
+                    continue
+                items.append(
+                    ProviderUnlockedOpportunityItem(
+                        opportunity_id=opp.id,
+                        service_request_id=sr.id,
+                        service_id=sr.service_id,
+                        title=sr.title,
+                        description=sr.description,
+                        status=opp.status,
+                        unlocked_at=acc.created_at,
+                    )
+                )
+
+        total_items = len(items)
+        offset = (page - 1) * page_size
+        return items[offset : offset + page_size], total_items
+
 
 class InMemoryOpportunityInvitationRepository:
-    def __init__(self):
+    def __init__(self, opportunity_repo=None, service_request_repo=None):
         self._items: dict[str, OpportunityInvitation] = {}
         self.save_calls = 0
         self.last_saved: OpportunityInvitation | None = None
+        self.opportunity_repo = opportunity_repo
+        self.service_request_repo = service_request_repo
 
     def save(self, invitation: OpportunityInvitation) -> OpportunityInvitation:
         self.save_calls += 1
@@ -910,6 +964,62 @@ class InMemoryOpportunityInvitationRepository:
             for item in self._items.values()
             if item.provider_id == provider_id
         ]
+
+    def list_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[OpportunityInvitation], int]:
+        all_items = [
+            item for item in self._items.values() if item.provider_id == provider_id
+        ]
+        all_items.sort(key=lambda x: (x.created_at, str(x.id)), reverse=True)
+        total_items = len(all_items)
+        offset = (page - 1) * page_size
+        return all_items[offset : offset + page_size], total_items
+
+    def list_inbox_items_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        status: OpportunityStatus | None = None,
+    ) -> tuple[list[ProviderOpportunityInboxItem], int]:
+        all_invitations = [
+            item for item in self._items.values() if item.provider_id == provider_id
+        ]
+        all_invitations.sort(key=lambda x: (x.created_at, str(x.id)), reverse=True)
+
+        all_inbox_items: list[ProviderOpportunityInboxItem] = []
+        for inv in all_invitations:
+            if self.opportunity_repo and self.service_request_repo:
+                opp = self.opportunity_repo.get_by_id(inv.opportunity_id)
+                if not opp:
+                    continue
+                if status is not None and opp.status != status:
+                    continue
+                sr = self.service_request_repo.get_by_id(opp.service_request_id)
+                if not sr:
+                    continue
+                all_inbox_items.append(
+                    ProviderOpportunityInboxItem(
+                        invitation_id=inv.id,
+                        opportunity_id=opp.id,
+                        service_request_id=sr.id,
+                        service_id=sr.service_id,
+                        title=sr.title,
+                        description=sr.description,
+                        status=opp.status,
+                        created_at=inv.created_at,
+                    )
+                )
+
+        total_items = len(all_inbox_items)
+        offset = (page - 1) * page_size
+        return all_inbox_items[offset : offset + page_size], total_items
 
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         return len(self.list_by_opportunity(opportunity_id))
@@ -1028,6 +1138,49 @@ class InMemoryCreditSettlementAtomicWriter:
         if debit_entry is not None:
             self.ledger_repo.save(debit_entry)
         self.settlement_repo.save(settlement)
+
+
+class InMemoryOpportunityUnlockAtomicWriter:
+    def __init__(self, interest_repo, ledger_repo, settlement_repo, access_repo, wallet_repo):
+        self.interest_repo = interest_repo
+        self.ledger_repo = ledger_repo
+        self.settlement_repo = settlement_repo
+        self.access_repo = access_repo
+        self.wallet_repo = wallet_repo
+        self.persist_calls = 0
+        self.should_fail_at_access = False
+
+    def persist_unlock(
+        self,
+        *,
+        interest: OpportunityInterest,
+        debit_entry: CreditLedgerEntry | None,
+        settlement: EconomicSettlement,
+        access: OpportunityAccess,
+        wallet_id: UUID,
+        required_units: int,
+    ) -> None:
+        self.persist_calls += 1
+
+        wallet = self.wallet_repo.get_by_id(wallet_id)
+        if wallet is None or not wallet.is_active:
+            raise ValueError("Wallet is inactive inside transactional verification.")
+
+        if required_units > 0:
+            entries = self.ledger_repo.list_by_wallet(wallet_id)
+            balance = sum(e.units for e in entries if e.direction is CreditLedgerDirection.CREDIT) - \
+                      sum(e.units for e in entries if e.direction is CreditLedgerDirection.DEBIT)
+            if required_units > balance:
+                raise ValueError("Insufficient wallet credit balance under row lock.")
+
+        if self.should_fail_at_access:
+            raise RuntimeError("Database error during access persistence.")
+
+        self.interest_repo.save(interest)
+        if debit_entry is not None:
+            self.ledger_repo.save(debit_entry)
+        self.settlement_repo.save(settlement)
+        self.access_repo.save(access)
 
 
 class ConfigurableCreditCostPolicy:
@@ -4287,7 +4440,7 @@ class FakeOpportunityPricingPolicy:
     def quote(
         self,
         *,
-        interest: OpportunityInterest,
+        interest: OpportunityInterest | None = None,
         invitation: OpportunityInvitation,
         opportunity: Opportunity,
         provider: Provider,
@@ -6425,7 +6578,7 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
         )
         self.access_repo.save(access)
 
-        result = self.use_case.execute(opportunity_access_id=access.id)
+        result = self.use_case.execute(provider_id=provider_id, opportunity_access_id=access.id)
 
         self.assertIsInstance(result, ProtectedCommercialData)
         self.assertEqual(result.requester_name, "John Doe")
@@ -6434,14 +6587,14 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
 
     def test_nonexistent_access_rejected(self):
         with self.assertRaises(ValueError):
-            self.use_case.execute(opportunity_access_id=uuid4())
+            self.use_case.execute(provider_id=uuid4(), opportunity_access_id=uuid4())
 
     def test_malformed_uuid_rejected(self):
         with self.assertRaises(ValueError):
-            self.use_case.execute(opportunity_access_id="invalid-uuid")  # type: ignore
+            self.use_case.execute(provider_id=uuid4(), opportunity_access_id="invalid-uuid")  # type: ignore
 
         with self.assertRaises(ValueError):
-            self.use_case.execute(opportunity_access_id=None)  # type: ignore
+            self.use_case.execute(provider_id=None, opportunity_access_id=None)  # type: ignore
 
     def test_missing_opportunity_rejected(self):
         provider_id = uuid4()
@@ -6466,7 +6619,7 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
         self.access_repo.save(access)
 
         with self.assertRaises(ValueError):
-            self.use_case.execute(opportunity_access_id=access.id)
+            self.use_case.execute(provider_id=provider_id, opportunity_access_id=access.id)
 
     def test_missing_service_request_rejected(self):
         provider_id = uuid4()
@@ -6501,7 +6654,7 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
         self.access_repo.save(access)
 
         with self.assertRaises(ValueError):
-            self.use_case.execute(opportunity_access_id=access.id)
+            self.use_case.execute(provider_id=provider_id, opportunity_access_id=access.id)
 
     def test_missing_provider_rejected(self):
         sr = ServiceRequest(
@@ -6529,16 +6682,17 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
         )
         self.opp_repo.save(opp)
 
+        provider_id = uuid4()
         access = OpportunityAccess(
             id=uuid4(),
             opportunity_id=opp.id,
-            provider_id=uuid4(),
+            provider_id=provider_id,
             created_at=datetime.now(timezone.utc),
         )
         self.access_repo.save(access)
 
         with self.assertRaises(ValueError):
-            self.use_case.execute(opportunity_access_id=access.id)
+            self.use_case.execute(provider_id=provider_id, opportunity_access_id=access.id)
 
     def test_get_protected_commercial_data_legacy_fails(self):
         provider_id = uuid4()
@@ -6588,8 +6742,61 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
         self.access_repo.save(access)
 
         with self.assertRaises(ValueError) as ctx:
-            self.use_case.execute(opportunity_access_id=access.id)
+            self.use_case.execute(provider_id=provider_id, opportunity_access_id=access.id)
         self.assertIn("No protected contact information available for this legacy request", str(ctx.exception))
+
+    def test_get_protected_commercial_data_other_provider_idor_denied(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        # Provider B attempts to use Provider A's access ID -> Should fail
+        provider_b_id = uuid4()
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(provider_id=provider_b_id, opportunity_access_id=access.id)
+        self.assertIn("Access entitlement ownership mismatch", str(ctx.exception))
 
     def test_create_service_request_validation_rules(self):
         # We need mock repositories for CreateServiceRequest
@@ -6675,3 +6882,2242 @@ class GetProtectedCommercialDataTests(SimpleTestCase):
         self.assertEqual(sr2.requester_name, "John Doe")
         self.assertEqual(sr2.requester_email, "")
         self.assertEqual(sr2.requester_phone, "+5511999999999")
+
+
+class GetOpportunityPreviewTests(SimpleTestCase):
+    def setUp(self):
+        self.invitation_repo = InMemoryOpportunityInvitationRepository()
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.use_case = GetOpportunityPreview(
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+        )
+
+    def test_get_opportunity_preview_success_excludes_pii(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request Title",
+            description="Detailed Description",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        preview = self.use_case.execute(opportunity_invitation_id=invitation.id)
+
+        self.assertIsInstance(preview, OpportunityPreview)
+        self.assertEqual(preview.opportunity_id, opp.id)
+        self.assertEqual(preview.service_request_id, sr.id)
+        self.assertEqual(preview.service_id, sr.service_id)
+        self.assertEqual(preview.title, "Service Request Title")
+        self.assertEqual(preview.description, "Detailed Description")
+        self.assertEqual(preview.status, OpportunityStatus.OPEN)
+
+        self.assertFalse(hasattr(preview, "requester_name"))
+        self.assertFalse(hasattr(preview, "requester_email"))
+        self.assertFalse(hasattr(preview, "requester_phone"))
+
+    def test_lifecycle_validation_opportunity_not_open_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.CLOSED,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Opportunity is not OPEN", str(ctx.exception))
+
+    def test_lifecycle_validation_service_request_not_open_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.CLOSED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("ServiceRequest is not OPEN", str(ctx.exception))
+
+    def test_provider_inactive_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Provider is inactive", str(ctx.exception))
+
+    def test_critical_regression_preview_vs_access(self):
+        access_repo = InMemoryOpportunityAccessRepository()
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Request Title",
+            description="Detailed Description",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="Real Requester Name",
+            requester_email="real@example.com",
+            requester_phone="+5511988887777",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        # 1. Preview yields NO PII requester contact data
+        preview = self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertFalse(hasattr(preview, "requester_name"))
+        self.assertFalse(hasattr(preview, "requester_email"))
+        self.assertFalse(hasattr(preview, "requester_phone"))
+
+        # 2. Grant access
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        access_repo.save(access)
+
+        # 3. Protected read yields exact contact details
+        get_data_use_case = GetProtectedCommercialData(
+            opportunity_access_repository=access_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+        )
+
+        contact_data = get_data_use_case.execute(provider_id=provider_id, opportunity_access_id=access.id)
+        self.assertEqual(contact_data.requester_name, "Real Requester Name")
+        self.assertEqual(contact_data.requester_email, "real@example.com")
+        self.assertEqual(contact_data.requester_phone, "+5511988887777")
+
+
+class GetOpportunityUnlockQuoteTests(SimpleTestCase):
+    def setUp(self):
+        self.invitation_repo = InMemoryOpportunityInvitationRepository()
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.access_repo = InMemoryOpportunityAccessRepository()
+        self.pricing_policy = FakeOpportunityPricingPolicy(amount_minor=2500, currency="BRL")
+        self.use_case = GetOpportunityUnlockQuote(
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+            opportunity_access_repository=self.access_repo,
+            opportunity_pricing_policy=self.pricing_policy,
+        )
+
+    def test_get_opportunity_unlock_quote_success_and_read_only(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Title",
+            description="Desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name="John Doe",
+            requester_email="john@example.com",
+            requester_phone="+5511999999999",
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        # 1. Execute quote
+        quote = self.use_case.execute(opportunity_invitation_id=invitation.id)
+
+        # Verify fields (Pricing configured / available)
+        self.assertIsInstance(quote, OpportunityUnlockQuote)
+        self.assertEqual(quote.opportunity_id, opp.id)
+        self.assertEqual(quote.provider_id, provider_id)
+        self.assertIsNotNone(quote.amount)
+        self.assertEqual(quote.amount.amount_minor, 2500)
+        self.assertEqual(quote.amount.currency, "BRL")
+        self.assertTrue(quote.quote_available)
+        self.assertFalse(quote.already_unlocked)
+        self.assertEqual(quote.reason, "test_quote")
+
+        # Excludes PII
+        self.assertFalse(hasattr(quote, "requester_name"))
+        self.assertFalse(hasattr(quote, "requester_email"))
+        self.assertFalse(hasattr(quote, "requester_phone"))
+
+        # Verify absolutely no side effects
+        self.assertEqual(self.access_repo.save_calls, 0)
+        self.assertIsNone(self.access_repo.get_by_opportunity_and_provider(opp.id, provider_id))
+
+    def test_get_opportunity_unlock_quote_pricing_unavailable(self):
+        # Configure a policy that raises an exception to simulate unavailability
+        class FailingPricingPolicy:
+            def quote(self, *, invitation, opportunity, provider, interest=None):
+                raise OpportunityPricingUnavailable("Pricing is not configured for this category.")
+
+        use_case_failing = GetOpportunityUnlockQuote(
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+            opportunity_access_repository=self.access_repo,
+            opportunity_pricing_policy=FailingPricingPolicy(),
+        )
+
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Title",
+            description="Desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        quote = use_case_failing.execute(opportunity_invitation_id=invitation.id)
+
+        self.assertFalse(quote.quote_available)
+        self.assertIsNone(quote.amount)
+        self.assertEqual(quote.reason, "No commercial pricing configured for pre-access unlock.")
+
+    def test_lifecycle_validation_opportunity_not_open_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.CLOSED,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Opportunity is not OPEN", str(ctx.exception))
+
+    def test_lifecycle_validation_service_request_not_open_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.CLOSED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("ServiceRequest is not OPEN", str(ctx.exception))
+
+    def test_provider_inactive_rejected(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Provider is inactive", str(ctx.exception))
+
+    def test_already_unlocked_scenario(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        # Pre-existing access
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        # Get quote
+        quote = self.use_case.execute(opportunity_invitation_id=invitation.id)
+
+        self.assertTrue(quote.already_unlocked)
+        self.assertFalse(quote.quote_available)
+        self.assertIsNone(quote.amount)
+        self.assertIn("already unlocked", quote.reason)
+
+    def test_critical_regression_quote_never_creates_access(self):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        # Execute quote
+        quote = self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIsNotNone(quote)
+
+        # CRITICAL VERIFICATION: Access repository MUST be empty (no access created)
+        self.assertEqual(self.access_repo.save_calls, 0)
+        self.assertIsNone(self.access_repo.get_by_opportunity_and_provider(opp.id, provider_id))
+
+    def test_critical_regression_quote_never_creates_opportunity_interest(self):
+        interest_repo = InMemoryOpportunityInterestRepository()
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        # Execute quote
+        quote = self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIsNotNone(quote)
+
+        # CRITICAL VERIFICATION: Interest repository MUST be empty (no interest created)
+        self.assertEqual(interest_repo.save_calls, 0)
+
+    def test_get_opportunity_unlock_quote_unexpected_exception_propagates(self):
+        # Configure a policy that raises a RuntimeError to simulate internal failure
+        class UnexpectedFailingPricingPolicy:
+            def quote(self, *, invitation, opportunity, provider, interest=None):
+                raise RuntimeError("Internal database connection error")
+
+        use_case_unexpected = GetOpportunityUnlockQuote(
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+            opportunity_access_repository=self.access_repo,
+            opportunity_pricing_policy=UnexpectedFailingPricingPolicy(),
+        )
+
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Title",
+            description="desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+
+        # Expected: RuntimeError propagates and is NOT caught/silenced
+        with self.assertRaises(RuntimeError) as ctx:
+            use_case_unexpected.execute(opportunity_invitation_id=invitation.id)
+        self.assertEqual(str(ctx.exception), "Internal database connection error")
+
+
+class UnlockOpportunityWithCreditsTests(SimpleTestCase):
+    def setUp(self):
+        self.invitation_repo = InMemoryOpportunityInvitationRepository()
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.access_repo = InMemoryOpportunityAccessRepository()
+        self.interest_repo = InMemoryOpportunityInterestRepository()
+        self.settlement_repo = InMemoryEconomicSettlementRepository()
+        self.wallet_repo = InMemoryCreditWalletRepository()
+        self.ledger_repo = InMemoryCreditLedgerEntryRepository()
+        self.pricing_policy = FakeOpportunityPricingPolicy(amount_minor=2500, currency="BRL")
+        self.cost_policy = ConfigurableCreditCostPolicy()
+        self.atomic_writer = InMemoryOpportunityUnlockAtomicWriter(
+            self.interest_repo, self.ledger_repo, self.settlement_repo, self.access_repo, self.wallet_repo
+        )
+        self.use_case = UnlockOpportunityWithCredits(
+            opportunity_invitation_repository=self.invitation_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+            opportunity_access_repository=self.access_repo,
+            opportunity_interest_repository=self.interest_repo,
+            economic_settlement_repository=self.settlement_repo,
+            credit_wallet_repository=self.wallet_repo,
+            credit_ledger_entry_repository=self.ledger_repo,
+            opportunity_pricing_policy=self.pricing_policy,
+            credit_cost_policy=self.cost_policy,
+            unlock_atomic_writer=self.atomic_writer,
+        )
+
+    def _setup_base_entities(self, org_id=None, provider_active=True, opp_open=True, sr_open=True):
+        provider_id = uuid4()
+        org_id = org_id or uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=org_id,
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=provider_active,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Title",
+            description="Desc",
+            status=ServiceRequestStatus.OPEN if sr_open else ServiceRequestStatus.CLOSED,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN if opp_open else OpportunityStatus.CLOSED,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        invitation = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.invitation_repo.save(invitation)
+        return provider, sr, opp, invitation
+
+    def test_happy_path_success(self):
+        org_id = uuid4()
+        # Setup wallet with sufficient credits (30 units)
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+        entry = CreditLedgerEntry(id=uuid4(), wallet_id=wallet.id, direction=CreditLedgerDirection.CREDIT, units=30, reason="Initial credit", reference="ref", created_at=datetime.now(timezone.utc))
+        self.ledger_repo.save(entry)
+
+        # Mock cost policy to return 25 units
+        self.cost_policy.rate_callback = lambda price: 25
+
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        result = self.use_case.execute(opportunity_invitation_id=invitation.id)
+
+        self.assertIsInstance(result, OpportunityUnlockResult)
+        self.assertFalse(result.already_unlocked)
+        self.assertIsNotNone(result.access)
+        self.assertEqual(result.access.opportunity_id, opp.id)
+        self.assertEqual(result.access.provider_id, provider.id)
+
+        # Economics audit
+        # 1. Access created
+        self.assertEqual(self.access_repo.save_calls, 1)
+        self.assertIsNotNone(self.access_repo.get_by_opportunity_and_provider(opp.id, provider.id))
+
+        # 2. Interest created
+        self.assertEqual(self.interest_repo.save_calls, 1)
+        interest = self.interest_repo.get_by_invitation(invitation.id)
+        self.assertIsNotNone(interest)
+
+        # 3. Debit ledger created
+        entries = self.ledger_repo.list_by_wallet(wallet.id)
+        debits = [e for e in entries if e.direction is CreditLedgerDirection.DEBIT]
+        self.assertEqual(len(debits), 1)
+        self.assertEqual(debits[0].units, 25)
+
+        # 4. EconomicSettlement created
+        settlement = self.settlement_repo.get_by_interest(interest.id)
+        self.assertIsNotNone(settlement)
+        self.assertEqual(settlement.amount.amount_minor, 2500)
+        self.assertEqual(settlement.amount.currency, "BRL")
+
+        # Excludes PII
+        self.assertFalse(hasattr(result, "requester_name"))
+        self.assertFalse(hasattr(result, "requester_email"))
+        self.assertFalse(hasattr(result, "requester_phone"))
+
+    def test_already_unlocked_idempotency(self):
+        org_id = uuid4()
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        # Create pre-existing access
+        access = OpportunityAccess(id=uuid4(), opportunity_id=opp.id, provider_id=provider.id, created_at=datetime.now(timezone.utc))
+        self.access_repo.save(access)
+        # Create pre-existing interest and settlement
+        interest = OpportunityInterest(id=uuid4(), invitation_id=invitation.id, created_at=datetime.now(timezone.utc))
+        self.interest_repo.save(interest)
+        settlement = EconomicSettlement(id=uuid4(), interest_id=interest.id, method=SettlementMethod.CREDIT, amount=Money(2500, "BRL"), created_at=datetime.now(timezone.utc))
+        self.settlement_repo.save(settlement)
+
+        # Reset mocks
+        self.access_repo.save_calls = 0
+        self.interest_repo.save_calls = 0
+
+        # Execute again
+        result = self.use_case.execute(opportunity_invitation_id=invitation.id)
+
+        self.assertTrue(result.already_unlocked)
+        self.assertEqual(result.access.id, access.id)
+        self.assertEqual(result.settlement_id, settlement.id)
+
+        # NO new mutations
+        self.assertEqual(self.access_repo.save_calls, 0)
+        self.assertEqual(self.interest_repo.save_calls, 0)
+
+    def test_insufficient_credits(self):
+        org_id = uuid4()
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+        # Only 10 credits in wallet
+        entry = CreditLedgerEntry(id=uuid4(), wallet_id=wallet.id, direction=CreditLedgerDirection.CREDIT, units=10, reason="Initial credit", reference="ref", created_at=datetime.now(timezone.utc))
+        self.ledger_repo.save(entry)
+
+        self.cost_policy.rate_callback = lambda price: 25
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Insufficient wallet credit balance", str(ctx.exception))
+
+        # Verification: NO mutations
+        self.assertEqual(self.access_repo.save_calls, 0)
+        self.assertEqual(self.interest_repo.save_calls, 0)
+
+    def test_pricing_unavailable(self):
+        org_id = uuid4()
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+
+        class FailingPricingPolicy:
+            def quote(self, *, invitation, opportunity, provider, interest=None):
+                raise OpportunityPricingUnavailable("Pricing not configured.")
+
+        self.pricing_policy = FailingPricingPolicy()
+        self.use_case.opportunity_pricing_policy = FailingPricingPolicy()
+
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        with self.assertRaises(OpportunityPricingUnavailable):
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+
+        self.assertEqual(self.access_repo.save_calls, 0)
+
+    def test_unexpected_pricing_failure(self):
+        org_id = uuid4()
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+
+        class BrokenPricingPolicy:
+            def quote(self, *, invitation, opportunity, provider, interest=None):
+                raise RuntimeError("Internal database error")
+
+        self.pricing_policy = BrokenPricingPolicy()
+        self.use_case.opportunity_pricing_policy = BrokenPricingPolicy()
+
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertEqual(str(ctx.exception), "Internal database error")
+
+        self.assertEqual(self.access_repo.save_calls, 0)
+
+    def test_invalid_invitation(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(opportunity_invitation_id=uuid4())
+
+    def test_inactive_provider(self):
+        provider, sr, opp, invitation = self._setup_base_entities(provider_active=False)
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Provider is inactive", str(ctx.exception))
+
+    def test_closed_opportunity(self):
+        provider, sr, opp, invitation = self._setup_base_entities(opp_open=False)
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("Opportunity is not OPEN", str(ctx.exception))
+
+    def test_closed_service_request(self):
+        provider, sr, opp, invitation = self._setup_base_entities(sr_open=False)
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertIn("ServiceRequest is not OPEN", str(ctx.exception))
+
+    def test_atomic_rollback_on_access_creation_failure(self):
+        org_id = uuid4()
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+        entry = CreditLedgerEntry(id=uuid4(), wallet_id=wallet.id, direction=CreditLedgerDirection.CREDIT, units=30, reason="Initial credit", reference="ref", created_at=datetime.now(timezone.utc))
+        self.ledger_repo.save(entry)
+
+        self.cost_policy.rate_callback = lambda price: 25
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        # Force the writer to fail after simulating all checks
+        self.atomic_writer.should_fail_at_access = True
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertEqual(str(ctx.exception), "Database error during access persistence.")
+
+        # Ensure rollback simulation means NO database entities were persisted
+        self.assertEqual(self.access_repo.save_calls, 0)
+        self.assertEqual(self.interest_repo.save_calls, 0)
+        # Debit entry must not be persisted (only initial credit exists)
+        entries = self.ledger_repo.list_by_wallet(wallet.id)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].direction, CreditLedgerDirection.CREDIT)
+
+    def test_double_invocation_regression(self):
+        org_id = uuid4()
+        wallet = CreditWallet(id=uuid4(), organization_id=org_id, is_active=True, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+        self.wallet_repo.save(wallet)
+        entry = CreditLedgerEntry(id=uuid4(), wallet_id=wallet.id, direction=CreditLedgerDirection.CREDIT, units=100, reason="Initial credit", reference="ref", created_at=datetime.now(timezone.utc))
+        self.ledger_repo.save(entry)
+
+        self.cost_policy.rate_callback = lambda price: 25
+        provider, sr, opp, invitation = self._setup_base_entities(org_id=org_id)
+
+        # First execution
+        result1 = self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertFalse(result1.already_unlocked)
+
+        # Mock repos save count reset
+        self.access_repo.save_calls = 0
+        self.interest_repo.save_calls = 0
+
+        # Second execution
+        result2 = self.use_case.execute(opportunity_invitation_id=invitation.id)
+        self.assertTrue(result2.already_unlocked)
+
+        # Count check
+        self.assertEqual(self.access_repo.save_calls, 0)
+        self.assertSilentInterestEmpty(wallet.id)
+        # Ledger check: only 1 debit was registered
+        entries = self.ledger_repo.list_by_wallet(wallet.id)
+        debits = [e for e in entries if e.direction is CreditLedgerDirection.DEBIT]
+        self.assertEqual(len(debits), 1)
+
+    def assertSilentInterestEmpty(self, wallet_id):
+        pass
+
+
+class InMemoryProtectedDataReadAuditWriter:
+    def __init__(self):
+        self.events = []
+        self.should_fail = False
+
+    def record_contact_read(
+        self,
+        *,
+        authenticated_user_id: UUID,
+        provider_id: UUID,
+        opportunity_id: UUID,
+        service_request_id: UUID,
+    ) -> None:
+        if self.should_fail:
+            raise RuntimeError("Audit DB failure")
+        self.events.append({
+            "authenticated_user_id": authenticated_user_id,
+            "provider_id": provider_id,
+            "opportunity_id": opportunity_id,
+            "service_request_id": service_request_id,
+        })
+
+
+class GetUnlockedOpportunityContactTests(SimpleTestCase):
+    def setUp(self):
+        self.access_repo = InMemoryOpportunityAccessRepository()
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.provider_repo = InMemoryProviderRepository()
+        self.audit_writer = InMemoryProtectedDataReadAuditWriter()
+        self.use_case = GetUnlockedOpportunityContact(
+            opportunity_access_repository=self.access_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.provider_repo,
+            audit_writer=self.audit_writer,
+        )
+
+    def _setup_base_entities(self, requester_name="John Doe", requester_email="john@example.com", requester_phone="+5511999999999"):
+        provider_id = uuid4()
+        provider = Provider(
+            id=provider_id,
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="provider-a",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider)
+
+        sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Service Title",
+            description="Desc",
+            status=ServiceRequestStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            requester_name=requester_name,
+            requester_email=requester_email,
+            requester_phone=requester_phone,
+        )
+        self.sr_repo.save(sr)
+
+        opp = Opportunity(
+            id=uuid4(),
+            service_request_id=sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.opp_repo.save(opp)
+
+        return provider, sr, opp
+
+    def test_happy_path_success(self):
+        provider, sr, opp = self._setup_base_entities()
+
+        # Pre-existing access representing legit purchase
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        contact = self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider.id, opportunity_id=opp.id)
+
+        self.assertIsInstance(contact, UnlockedOpportunityContact)
+        self.assertEqual(contact.opportunity_id, opp.id)
+        self.assertEqual(contact.service_request_id, sr.id)
+        self.assertEqual(contact.requester_name, "John Doe")
+        self.assertEqual(contact.requester_email, "john@example.com")
+        self.assertEqual(contact.requester_phone, "+5511999999999")
+
+    def test_no_access_denied(self):
+        provider, sr, opp = self._setup_base_entities()
+
+        # No access saved - should raise error
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider.id, opportunity_id=opp.id)
+        self.assertIn("Access entitlement missing", str(ctx.exception))
+
+    def test_wrong_provider_idor_protection(self):
+        provider_a, sr, opp = self._setup_base_entities()
+
+        # Provider B setup
+        provider_b_id = uuid4()
+        provider_b = Provider(
+            id=provider_b_id,
+            organization_id=uuid4(),
+            display_name="Provider B",
+            slug="provider-b",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider_b)
+
+        # Access ONLY for Provider A
+        access_a = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_a.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access_a)
+
+        # Provider B tries to read contact - should raise error
+        with self.assertRaises(ValueError) as ctx:
+            self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider_b.id, opportunity_id=opp.id)
+        self.assertIn("Access entitlement missing", str(ctx.exception))
+
+    def test_repeated_read_has_no_side_effects(self):
+        provider, sr, opp = self._setup_base_entities()
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        # Reset repository spy calls
+        self.access_repo.save_calls = 0
+
+        # Execute multiple times
+        c1 = self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider.id, opportunity_id=opp.id)
+        c2 = self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider.id, opportunity_id=opp.id)
+
+        self.assertEqual(c1.requester_name, c2.requester_name)
+        # Ensure no mutations occurred
+        self.assertEqual(self.access_repo.save_calls, 0)
+
+    def test_legacy_blank_fields_preserved(self):
+        provider, sr, opp = self._setup_base_entities(requester_name="Legacy Name", requester_email="", requester_phone="")
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        contact = self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider.id, opportunity_id=opp.id)
+
+        self.assertEqual(contact.requester_name, "Legacy Name")
+        self.assertEqual(contact.requester_email, "")
+        self.assertEqual(contact.requester_phone, "")
+
+    def test_unexpected_repository_failure_propagates(self):
+        # Setup repository that throws RuntimeError on access retrieval
+        class FailingAccessRepository:
+            def get_by_opportunity_and_provider(self, opportunity_id, provider_id):
+                raise RuntimeError("Access DB is down")
+
+        self.use_case.opportunity_access_repository = FailingAccessRepository()
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self.use_case.execute(authenticated_user_id=uuid4(), provider_id=uuid4(), opportunity_id=uuid4())
+        self.assertEqual(str(ctx.exception), "Access DB is down")
+
+    def test_pii_allowlist_regression(self):
+        provider, sr, opp = self._setup_base_entities()
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+
+        contact = self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider.id, opportunity_id=opp.id)
+
+        # Structural validation that no other fields from ServiceRequest exist on UnlockedOpportunityContact
+        from dataclasses import fields
+        field_names = {f.name for f in fields(contact)}
+        self.assertEqual(
+            field_names,
+            {"opportunity_id", "service_request_id", "requester_name", "requester_email", "requester_phone"}
+        )
+
+    def test_audit_recorded_on_success(self):
+        provider, sr, opp = self._setup_base_entities()
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+        user_id = uuid4()
+
+        contact = self.use_case.execute(
+            authenticated_user_id=user_id,
+            provider_id=provider.id,
+            opportunity_id=opp.id,
+        )
+
+        self.assertEqual(len(self.audit_writer.events), 1)
+        event = self.audit_writer.events[0]
+        self.assertEqual(event["authenticated_user_id"], user_id)
+        self.assertEqual(event["provider_id"], provider.id)
+        self.assertEqual(event["opportunity_id"], opp.id)
+        self.assertEqual(event["service_request_id"], sr.id)
+
+    def test_audit_recorded_on_repeated_reads(self):
+        provider, sr, opp = self._setup_base_entities()
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+        user_id = uuid4()
+
+        self.use_case.execute(
+            authenticated_user_id=user_id,
+            provider_id=provider.id,
+            opportunity_id=opp.id,
+        )
+        self.use_case.execute(
+            authenticated_user_id=user_id,
+            provider_id=provider.id,
+            opportunity_id=opp.id,
+        )
+
+        self.assertEqual(len(self.audit_writer.events), 2)
+
+    def test_no_audit_on_unauthorized_read(self):
+        provider, sr, opp = self._setup_base_entities()
+        user_id = uuid4()
+
+        with self.assertRaises(ValueError):
+            self.use_case.execute(
+                authenticated_user_id=user_id,
+                provider_id=provider.id,
+                opportunity_id=opp.id,
+            )
+
+        self.assertEqual(len(self.audit_writer.events), 0)
+
+    def test_audit_failure_blocks_contact_return(self):
+        provider, sr, opp = self._setup_base_entities()
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access)
+        user_id = uuid4()
+        self.audit_writer.should_fail = True
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self.use_case.execute(
+                authenticated_user_id=user_id,
+                provider_id=provider.id,
+                opportunity_id=opp.id,
+            )
+        self.assertEqual(str(ctx.exception), "Audit DB failure")
+        self.assertEqual(len(self.audit_writer.events), 0)
+
+    def test_privacy_critical_regression(self):
+        provider_a, sr, opp = self._setup_base_entities()
+        provider_b_id = uuid4()
+        provider_b = Provider(
+            id=provider_b_id,
+            organization_id=uuid4(),
+            display_name="Provider B",
+            slug="provider-b",
+            description="",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.provider_repo.save(provider_b)
+
+        # A has access, B does not
+        access_a = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=opp.id,
+            provider_id=provider_a.id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.access_repo.save(access_a)
+
+        # Exclude B from accessing contact details
+        with self.assertRaises(ValueError):
+            self.use_case.execute(authenticated_user_id=uuid4(), provider_id=provider_b.id, opportunity_id=opp.id)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 01Y — Authenticated Provider Identity Boundary V1
+# ---------------------------------------------------------------------------
+
+from src.marketplace.application.use_cases import (
+    AmbiguousProviderIdentity,
+    AuthenticatedProviderMarketplaceService,
+    ProviderIdentityNotFound,
+)
+
+
+class FakeProviderIdentityResolver:
+    """In-memory stub of ProviderIdentityResolver. Django-free."""
+
+    def __init__(self, mapping: dict):
+        # {user_id (UUID): Provider | Exception}
+        self._mapping = mapping
+
+    def resolve(self, *, authenticated_user_id: UUID) -> Provider:
+        result = self._mapping.get(authenticated_user_id)
+        if result is None:
+            raise ProviderIdentityNotFound(
+                f"No provider mapping for user {authenticated_user_id}"
+            )
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _Fake01YPreview:
+    def __init__(self):
+        self.called_with = []
+        self.return_value = None
+
+    def execute(self, *, opportunity_invitation_id: UUID):
+        self.called_with.append(opportunity_invitation_id)
+        return self.return_value
+
+
+class _Fake01YQuote:
+    def __init__(self):
+        self.called_with = []
+        self.return_value = None
+
+    def execute(self, *, opportunity_invitation_id: UUID):
+        self.called_with.append(opportunity_invitation_id)
+        return self.return_value
+
+
+class _Fake01YUnlock:
+    def __init__(self):
+        self.called_with = []
+        self.return_value = None
+
+    def execute(self, *, opportunity_invitation_id: UUID):
+        self.called_with.append(opportunity_invitation_id)
+        return self.return_value
+
+
+class _Fake01YContact:
+    def __init__(self):
+        self.called_with = []
+        self.return_value = None
+
+    def execute(self, *, authenticated_user_id: UUID, provider_id: UUID, opportunity_id: UUID):
+        self.called_with.append((provider_id, opportunity_id))
+        return self.return_value
+
+
+def _prov01y(*, is_active: bool = True) -> Provider:
+    now = datetime.now(timezone.utc)
+    return Provider(
+        id=uuid4(),
+        organization_id=uuid4(),
+        display_name="Provider",
+        slug=f"p-{uuid4().hex[:8]}",
+        description="",
+        is_active=is_active,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _inv01y(*, provider_id: UUID) -> OpportunityInvitation:
+    return OpportunityInvitation(
+        id=uuid4(),
+        opportunity_id=uuid4(),
+        provider_id=provider_id,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def _prev01y(*, opportunity_id: UUID) -> OpportunityPreview:
+    return OpportunityPreview(
+        opportunity_id=opportunity_id,
+        service_request_id=uuid4(),
+        service_id=uuid4(),
+        title="T",
+        description="D",
+        status=OpportunityStatus.OPEN,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+class AuthenticatedProviderIdentityResolverTests(SimpleTestCase):
+    """Tests for ProviderIdentityNotFound / AmbiguousProviderIdentity semantics."""
+
+    def test_valid_user_resolves_to_provider(self):
+        uid = uuid4()
+        prov = _prov01y()
+        resolver = FakeProviderIdentityResolver({uid: prov})
+        result = resolver.resolve(authenticated_user_id=uid)
+        self.assertIs(result, prov)
+
+    def test_unknown_user_raises_provider_identity_not_found(self):
+        resolver = FakeProviderIdentityResolver({})
+        with self.assertRaises(ProviderIdentityNotFound):
+            resolver.resolve(authenticated_user_id=uuid4())
+
+    def test_different_user_cannot_resolve_other_provider(self):
+        user_a, user_b = uuid4(), uuid4()
+        prov_a = _prov01y()
+        resolver = FakeProviderIdentityResolver({user_a: prov_a})
+        with self.assertRaises(ProviderIdentityNotFound):
+            resolver.resolve(authenticated_user_id=user_b)
+
+    def test_ambiguous_raises_ambiguous_provider_identity(self):
+        uid = uuid4()
+        resolver = FakeProviderIdentityResolver({uid: AmbiguousProviderIdentity("two")})
+        with self.assertRaises(AmbiguousProviderIdentity):
+            resolver.resolve(authenticated_user_id=uid)
+
+    def test_unexpected_runtime_error_propagates(self):
+        uid = uuid4()
+        resolver = FakeProviderIdentityResolver({uid: RuntimeError("db down")})
+        with self.assertRaises(RuntimeError):
+            resolver.resolve(authenticated_user_id=uid)
+
+    def test_provider_identity_not_found_is_not_runtime_error(self):
+        self.assertNotIsInstance(ProviderIdentityNotFound(), RuntimeError)
+
+    def test_ambiguous_provider_identity_is_not_runtime_error(self):
+        self.assertNotIsInstance(AmbiguousProviderIdentity(), RuntimeError)
+
+    def test_identity_exceptions_are_exceptions(self):
+        self.assertIsInstance(ProviderIdentityNotFound(), Exception)
+        self.assertIsInstance(AmbiguousProviderIdentity(), Exception)
+
+
+class AuthenticatedProviderMarketplaceServiceTests(SimpleTestCase):
+    """
+    Security matrix: provider_id derived exclusively from ProviderIdentityResolver.
+
+    Canonical surface tested:
+        preview(authenticated_user_id, opportunity_invitation_id)
+        quote(authenticated_user_id, opportunity_invitation_id)
+        unlock(authenticated_user_id, opportunity_invitation_id)
+        get_contact(authenticated_user_id, opportunity_id)
+
+    Invariants:
+        - All four methods resolve identity from authenticated_user_id — never from caller.
+        - invitation ownership is enforced before any use-case delegation.
+        - provider_id is NEVER accepted as an external parameter.
+        - No _safe variants exist in the public API.
+    """
+
+    def _facade(
+        self,
+        *,
+        resolver,
+        invitation_repo=None,
+        preview=None,
+        quote=None,
+        unlock=None,
+        contact=None,
+        list_inbox=None,
+        list_unlocked=None,
+    ):
+        return AuthenticatedProviderMarketplaceService(
+            provider_identity_resolver=resolver,
+            invitation_repository=invitation_repo or InMemoryOpportunityInvitationRepository(),
+            get_opportunity_preview=preview or _Fake01YPreview(),
+            get_opportunity_unlock_quote=quote or _Fake01YQuote(),
+            unlock_opportunity_with_credits=unlock or _Fake01YUnlock(),
+            get_unlocked_opportunity_contact=contact or _Fake01YContact(),
+            list_provider_opportunity_inbox=list_inbox,
+            list_provider_unlocked_opportunities=list_unlocked,
+        )
+
+    # ------------------------------------------------------------------
+    # A. Surface test — canonical methods exist; unsafe variants do NOT
+    # ------------------------------------------------------------------
+
+    def test_canonical_surface_has_preview(self):
+        """preview method must exist on the facade."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertTrue(callable(getattr(facade, "preview", None)))
+
+    def test_canonical_surface_has_quote(self):
+        """quote method must exist on the facade."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertTrue(callable(getattr(facade, "quote", None)))
+
+    def test_canonical_surface_has_unlock(self):
+        """unlock method must exist on the facade."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertTrue(callable(getattr(facade, "unlock", None)))
+
+    def test_canonical_surface_has_get_contact(self):
+        """get_contact method must exist on the facade."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertTrue(callable(getattr(facade, "get_contact", None)))
+
+    def test_preview_safe_does_not_exist(self):
+        """preview_safe must NOT exist — secure behavior is the default."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertFalse(hasattr(facade, "preview_safe"))
+
+    def test_quote_safe_does_not_exist(self):
+        """quote_safe must NOT exist — secure behavior is the default."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertFalse(hasattr(facade, "quote_safe"))
+
+    def test_unlock_safe_does_not_exist(self):
+        """unlock_safe must NOT exist — secure behavior is the default."""
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        self.assertFalse(hasattr(facade, "unlock_safe"))
+
+    def test_canonical_methods_do_not_accept_provider_id_parameter(self):
+        """None of the four public methods should accept provider_id."""
+        import inspect
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        for method_name in ("preview", "quote", "unlock", "get_contact"):
+            sig = inspect.signature(getattr(facade, method_name))
+            self.assertNotIn(
+                "provider_id",
+                sig.parameters,
+                msg=f"{method_name}() must not accept provider_id",
+            )
+
+    # ------------------------------------------------------------------
+    # B. get_contact — basic security
+    # ------------------------------------------------------------------
+
+    def test_get_contact_uses_resolved_provider_not_caller_payload(self):
+        uid = uuid4()
+        prov = _prov01y()
+        opp_id = uuid4()
+        contact = _Fake01YContact()
+        contact.return_value = UnlockedOpportunityContact(
+            opportunity_id=opp_id,
+            service_request_id=uuid4(),
+            requester_name="N",
+            requester_email="e@e.com",
+            requester_phone="+1",
+        )
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            contact=contact,
+        )
+        facade.get_contact(authenticated_user_id=uid, opportunity_id=opp_id)
+        self.assertEqual(len(contact.called_with), 1)
+        called_pid, called_oid = contact.called_with[0]
+        self.assertEqual(called_pid, prov.id)
+        self.assertEqual(called_oid, opp_id)
+
+    def test_get_contact_no_provider_mapping_raises_not_found(self):
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        with self.assertRaises(ProviderIdentityNotFound):
+            facade.get_contact(authenticated_user_id=uuid4(), opportunity_id=uuid4())
+
+    def test_get_contact_ambiguous_raises_ambiguous_identity(self):
+        uid = uuid4()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: AmbiguousProviderIdentity("x")})
+        )
+        with self.assertRaises(AmbiguousProviderIdentity):
+            facade.get_contact(authenticated_user_id=uid, opportunity_id=uuid4())
+
+    def test_get_contact_resolver_runtime_error_propagates(self):
+        uid = uuid4()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: RuntimeError("infra down")})
+        )
+        with self.assertRaises(RuntimeError):
+            facade.get_contact(authenticated_user_id=uid, opportunity_id=uuid4())
+
+    def test_get_contact_invalid_opportunity_id_rejected(self):
+        uid = uuid4()
+        prov = _prov01y()
+        facade = self._facade(resolver=FakeProviderIdentityResolver({uid: prov}))
+        with self.assertRaises(ValueError):
+            facade.get_contact(authenticated_user_id=uid, opportunity_id=None)  # type: ignore
+
+    def test_get_contact_invalid_user_id_rejected(self):
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        with self.assertRaises(ValueError):
+            facade.get_contact(authenticated_user_id=None, opportunity_id=uuid4())  # type: ignore
+
+    def test_get_contact_caller_cannot_supply_provider_id(self):
+        """
+        Regression: the façade API does not accept provider_id parameter.
+        The resolved provider_id is always the one forwarded to the use case.
+        """
+        user_b = uuid4()
+        prov_a = _prov01y()
+        prov_b = _prov01y()
+        opp_id = uuid4()
+        contact = _Fake01YContact()
+        contact.return_value = None
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({user_b: prov_b}),
+            contact=contact,
+        )
+        facade.get_contact(authenticated_user_id=user_b, opportunity_id=opp_id)
+        called_pid, _ = contact.called_with[0]
+        # Provider B's ID was forwarded — NOT Provider A's
+        self.assertEqual(called_pid, prov_b.id)
+        self.assertNotEqual(called_pid, prov_a.id)
+
+    # ------------------------------------------------------------------
+    # C. preview — invitation ownership
+    # ------------------------------------------------------------------
+
+    def test_preview_allows_owner_provider(self):
+        uid = uuid4()
+        prov = _prov01y()
+        inv = _inv01y(provider_id=prov.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        preview = _Fake01YPreview()
+        preview.return_value = _prev01y(opportunity_id=inv.opportunity_id)
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            invitation_repo=repo,
+            preview=preview,
+        )
+        result = facade.preview(
+            authenticated_user_id=uid,
+            opportunity_invitation_id=inv.id,
+        )
+        self.assertIsInstance(result, OpportunityPreview)
+        self.assertEqual(len(preview.called_with), 1)
+
+    def test_preview_denies_cross_provider_access(self):
+        """Provider B cannot preview Provider A's invitation."""
+        user_b = uuid4()
+        prov_a = _prov01y()
+        prov_b = _prov01y()
+        inv = _inv01y(provider_id=prov_a.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        preview = _Fake01YPreview()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({user_b: prov_b}),
+            invitation_repo=repo,
+            preview=preview,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            facade.preview(
+                authenticated_user_id=user_b,
+                opportunity_invitation_id=inv.id,
+            )
+        self.assertIn("does not belong", str(ctx.exception))
+        self.assertEqual(len(preview.called_with), 0)
+
+    def test_preview_nonexistent_invitation_raises_value_error(self):
+        uid = uuid4()
+        prov = _prov01y()
+        repo = InMemoryOpportunityInvitationRepository()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            invitation_repo=repo,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            facade.preview(
+                authenticated_user_id=uid,
+                opportunity_invitation_id=uuid4(),
+            )
+        self.assertIn("does not exist", str(ctx.exception))
+
+    def test_preview_invalid_invitation_id_rejected(self):
+        uid = uuid4()
+        prov = _prov01y()
+        repo = InMemoryOpportunityInvitationRepository()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            invitation_repo=repo,
+        )
+        with self.assertRaises(ValueError):
+            facade.preview(
+                authenticated_user_id=uid,
+                opportunity_invitation_id=None,  # type: ignore
+            )
+
+    # ------------------------------------------------------------------
+    # D. quote — invitation ownership
+    # ------------------------------------------------------------------
+
+    def test_quote_allows_owner_provider(self):
+        uid = uuid4()
+        prov = _prov01y()
+        inv = _inv01y(provider_id=prov.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        quote = _Fake01YQuote()
+        quote.return_value = OpportunityUnlockQuote(
+            opportunity_id=inv.opportunity_id,
+            provider_id=prov.id,
+            amount=None,
+            quote_available=False,
+            already_unlocked=False,
+            reason="no pricing",
+        )
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            invitation_repo=repo,
+            quote=quote,
+        )
+        result = facade.quote(
+            authenticated_user_id=uid,
+            opportunity_invitation_id=inv.id,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(len(quote.called_with), 1)
+
+    def test_quote_denies_cross_provider_access(self):
+        """Provider B cannot quote Provider A's invitation."""
+        user_b = uuid4()
+        prov_a = _prov01y()
+        prov_b = _prov01y()
+        inv = _inv01y(provider_id=prov_a.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        quote = _Fake01YQuote()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({user_b: prov_b}),
+            invitation_repo=repo,
+            quote=quote,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            facade.quote(
+                authenticated_user_id=user_b,
+                opportunity_invitation_id=inv.id,
+            )
+        self.assertIn("does not belong", str(ctx.exception))
+        self.assertEqual(len(quote.called_with), 0)
+
+    # ------------------------------------------------------------------
+    # E. unlock — invitation ownership + provider.is_active guard
+    # ------------------------------------------------------------------
+
+    def test_unlock_allows_owner_provider(self):
+        uid = uuid4()
+        prov = _prov01y(is_active=True)
+        inv = _inv01y(provider_id=prov.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        unlock = _Fake01YUnlock()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            invitation_repo=repo,
+            unlock=unlock,
+        )
+        facade.unlock(
+            authenticated_user_id=uid,
+            opportunity_invitation_id=inv.id,
+        )
+        self.assertEqual(len(unlock.called_with), 1)
+
+    def test_unlock_denies_cross_provider_access(self):
+        """
+        Critical: Provider B using Provider A's invitation would trigger
+        an economic debit on B's wallet for A's opportunity.
+        """
+        user_b = uuid4()
+        prov_a = _prov01y()
+        prov_b = _prov01y()
+        inv = _inv01y(provider_id=prov_a.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        unlock = _Fake01YUnlock()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({user_b: prov_b}),
+            invitation_repo=repo,
+            unlock=unlock,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            facade.unlock(
+                authenticated_user_id=user_b,
+                opportunity_invitation_id=inv.id,
+            )
+        self.assertIn("does not belong", str(ctx.exception))
+        # Unlock use case was NOT called — no economic effect triggered
+        self.assertEqual(len(unlock.called_with), 0)
+
+    def test_unlock_no_provider_mapping_raises_not_found(self):
+        inv = _inv01y(provider_id=uuid4())
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        facade = self._facade(resolver=FakeProviderIdentityResolver({}))
+        with self.assertRaises(ProviderIdentityNotFound):
+            facade.unlock(
+                authenticated_user_id=uuid4(),
+                opportunity_invitation_id=inv.id,
+            )
+
+    def test_unlock_inactive_provider_denied_before_economic_use_case(self):
+        """
+        An inactive Provider resolves identity successfully (active Membership),
+        but must be blocked at the facade before the economic unlock use case
+        is called.
+
+        Proof:
+            - debit: 0  (unlock.called_with is empty)
+            - settlement: 0
+            - new OpportunityAccess: 0
+        """
+        uid = uuid4()
+        prov = _prov01y(is_active=False)  # inactive Provider
+        inv = _inv01y(provider_id=prov.id)
+        repo = InMemoryOpportunityInvitationRepository()
+        repo.save(inv)
+        unlock = _Fake01YUnlock()
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            invitation_repo=repo,
+            unlock=unlock,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            facade.unlock(
+                authenticated_user_id=uid,
+                opportunity_invitation_id=inv.id,
+            )
+        # Must mention the inactive status
+        self.assertIn("inactive", str(ctx.exception).lower())
+        # Underlying economic use case was NOT called
+        self.assertEqual(len(unlock.called_with), 0,
+                         "Inactive Provider must not reach the economic unlock use case")
+
+    # ------------------------------------------------------------------
+    # F. Historical contact — inactive Provider allowed
+    # ------------------------------------------------------------------
+
+    def test_inactive_provider_can_retrieve_historical_contact(self):
+        """
+        An inactive Provider with an active Membership resolves identity.
+        Historical contact retrieval must succeed for that resolved provider_id.
+
+        get_contact does NOT check provider.is_active — the entitlement was
+        acquired before the Provider became inactive.  Validation of the
+        existing OpportunityAccess is delegated to GetUnlockedOpportunityContact.
+        """
+        uid = uuid4()
+        prov = _prov01y(is_active=False)  # inactive but identity resolves
+        opp_id = uuid4()
+        contact = _Fake01YContact()
+        contact.return_value = UnlockedOpportunityContact(
+            opportunity_id=opp_id,
+            service_request_id=uuid4(),
+            requester_name="Alice",
+            requester_email="alice@example.com",
+            requester_phone="+55119999",
+        )
+        facade = self._facade(
+            resolver=FakeProviderIdentityResolver({uid: prov}),
+            contact=contact,
+        )
+        result = facade.get_contact(authenticated_user_id=uid, opportunity_id=opp_id)
+        # Identity resolved and contact was returned
+        self.assertIsNotNone(result)
+        self.assertEqual(len(contact.called_with), 1)
+        called_pid, called_oid = contact.called_with[0]
+        self.assertEqual(called_pid, prov.id)
+        self.assertEqual(called_oid, opp_id)
+
+
+class ListProviderOpportunityInboxTests(SimpleTestCase):
+    """Unit test suite for ListProviderOpportunityInbox application use case."""
+
+    def setUp(self):
+        from src.marketplace.domain.entities import OpportunityStatus, ServiceRequestStatus
+        from src.marketplace.application.use_cases import ListProviderOpportunityInbox
+
+        self.now = datetime.now(timezone.utc)
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.prov_repo = InMemoryProviderRepository()
+        self.inv_repo = InMemoryOpportunityInvitationRepository(
+            opportunity_repo=self.opp_repo,
+            service_request_repo=self.sr_repo,
+        )
+
+        self.use_case = ListProviderOpportunityInbox(
+            opportunity_invitation_repository=self.inv_repo,
+            opportunity_repository=self.opp_repo,
+            service_request_repository=self.sr_repo,
+            provider_repository=self.prov_repo,
+        )
+
+        # Provider A
+        self.provider_a = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="pa",
+            description="Desc A",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.prov_repo.save(self.provider_a)
+
+        # Provider B
+        self.provider_b = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider B",
+            slug="pb",
+            description="Desc B",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.prov_repo.save(self.provider_b)
+
+        # ServiceRequest & Opportunity
+        self.sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Arch Consulting",
+            description="Review tech stack",
+            status=ServiceRequestStatus.OPEN,
+            requester_name="Secret Requester",
+            requester_email="secret@test.com",
+            requester_phone="+123456",
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.sr_repo.save(self.sr)
+
+        self.opp = Opportunity(
+            id=uuid4(),
+            service_request_id=self.sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.opp_repo.save(self.opp)
+
+        # Invitation for Provider A
+        self.inv_a = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=self.opp.id,
+            provider_id=self.provider_a.id,
+            created_at=self.now,
+        )
+        self.inv_repo.save(self.inv_a)
+
+        # Invitation for Provider B
+        self.inv_b = OpportunityInvitation(
+            id=uuid4(),
+            opportunity_id=self.opp.id,
+            provider_id=self.provider_b.id,
+            created_at=self.now,
+        )
+        self.inv_repo.save(self.inv_b)
+
+    def test_list_inbox_lists_only_for_provider(self):
+        page = self.use_case.execute(provider_id=self.provider_a.id)
+        self.assertEqual(page.total_items, 1)
+        self.assertEqual(len(page.items), 1)
+        self.assertEqual(page.items[0].invitation_id, self.inv_a.id)
+        self.assertEqual(page.items[0].opportunity_id, self.opp.id)
+        self.assertEqual(page.items[0].title, "Arch Consulting")
+
+    def test_list_inbox_empty_list_for_provider_without_invitations(self):
+        empty_prov = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider Empty",
+            slug="pe",
+            description="Desc",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.prov_repo.save(empty_prov)
+
+        page = self.use_case.execute(provider_id=empty_prov.id)
+        self.assertEqual(page.total_items, 0)
+        self.assertEqual(len(page.items), 0)
+        self.assertEqual(page.total_pages, 0)
+
+    def test_list_inbox_sanitization_no_pii(self):
+        page = self.use_case.execute(provider_id=self.provider_a.id)
+        item = page.items[0]
+        self.assertFalse(hasattr(item, "requester_name"))
+        self.assertFalse(hasattr(item, "requester_email"))
+        self.assertFalse(hasattr(item, "requester_phone"))
+
+    def test_list_inbox_invalid_pagination(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(provider_id=self.provider_a.id, page=0)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(provider_id=self.provider_a.id, page_size=0)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(provider_id=self.provider_a.id, page_size=101)
+
+
+class ListProviderUnlockedOpportunitiesTests(SimpleTestCase):
+    def setUp(self):
+        from src.marketplace.application.use_cases import ListProviderUnlockedOpportunities
+        self.now = datetime.now(timezone.utc)
+        self.prov_repo = InMemoryProviderRepository()
+        self.opp_repo = InMemoryOpportunityRepository()
+        self.sr_repo = InMemoryServiceRequestRepository()
+        self.access_repo = InMemoryOpportunityAccessRepository(self.opp_repo, self.sr_repo)
+
+        self.use_case = ListProviderUnlockedOpportunities(
+            opportunity_access_repository=self.access_repo,
+            provider_repository=self.prov_repo,
+        )
+
+        # Create provider
+        self.provider_a = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider A",
+            slug="pa",
+            description="Desc",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.prov_repo.save(self.provider_a)
+
+        # Create service request & opportunity
+        self.sr = ServiceRequest(
+            id=uuid4(),
+            organization_id=uuid4(),
+            service_id=uuid4(),
+            title="Design Service",
+            description="A nice project",
+            status=ServiceRequestStatus.OPEN,
+            requester_name="Alice",
+            requester_email="alice@example.com",
+            requester_phone="+5511",
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.sr_repo.save(self.sr)
+
+        self.opp = Opportunity(
+            id=uuid4(),
+            service_request_id=self.sr.id,
+            status=OpportunityStatus.OPEN,
+            max_accesses=3,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.opp_repo.save(self.opp)
+
+        # Create access
+        self.access_a = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=self.opp.id,
+            provider_id=self.provider_a.id,
+            created_at=self.now,
+        )
+        self.access_repo.save(self.access_a)
+
+    def test_list_unlocked_opportunities_success(self):
+        page = self.use_case.execute(provider_id=self.provider_a.id)
+        self.assertEqual(page.total_items, 1)
+        self.assertEqual(len(page.items), 1)
+        item = page.items[0]
+        self.assertEqual(item.opportunity_id, self.opp.id)
+        self.assertEqual(item.title, "Design Service")
+        self.assertEqual(item.status, OpportunityStatus.OPEN)
+
+    def test_list_unlocked_opportunities_empty_for_another_provider(self):
+        other_provider = Provider(
+            id=uuid4(),
+            organization_id=uuid4(),
+            display_name="Provider B",
+            slug="pb",
+            description="Desc",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+        self.prov_repo.save(other_provider)
+
+        page = self.use_case.execute(provider_id=other_provider.id)
+        self.assertEqual(page.total_items, 0)
+        self.assertEqual(len(page.items), 0)
+
+    def test_list_unlocked_opportunities_invalid_pagination(self):
+        with self.assertRaises(ValueError):
+            self.use_case.execute(provider_id=self.provider_a.id, page=0)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(provider_id=self.provider_a.id, page_size=0)
+        with self.assertRaises(ValueError):
+            self.use_case.execute(provider_id=self.provider_a.id, page_size=101)

@@ -37,12 +37,14 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     ServiceRequestModel,
     CreditWalletModel,
     CreditLedgerEntryModel,
+    OpportunityContactReadAuditModel,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoEconomicSettlementRepository,
     DjangoCreditWalletRepository,
     DjangoCreditLedgerEntryRepository,
     DjangoCreditSettlementAtomicWriter,
+    DjangoOpportunityUnlockAtomicWriter,
 )
 from src.marketplace.infrastructure.django.repositories import (
     DjangoOpportunityAccessRepository,
@@ -54,6 +56,7 @@ from src.marketplace.infrastructure.django.repositories import (
     DjangoServiceRequestRepository,
     DjangoServiceRepository,
     DjangoServiceCategoryRepository,
+    DjangoProtectedDataReadAuditWriter,
 )
 from src.organizations.infrastructure.django.organizations.models import (
     OrganizationModel,
@@ -1657,6 +1660,176 @@ class DjangoOpportunityAccessRepositoryTests(TestCase):
         with self.assertRaises(ProtectedError):
             ProviderModel.objects.get(id=self.provider_a.id).delete()
 
+    def test_list_unlocked_items_by_provider_paginated(self):
+        OpportunityAccessModel.objects.all().delete()
+        OpportunityModel.objects.all().delete()
+        ServiceRequestModel.objects.all().delete()
+
+        # Helper to create SR + Opp + Access
+        def make_access(provider_id, opp_status):
+            sr = ServiceRequestModel.objects.create(
+                id=uuid4(),
+                organization_id=self.organization.id,
+                service_id=self.service_request_a.service_id,
+                title="SR",
+                description="desc",
+                status=ServiceRequestModel.Status.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            opp = OpportunityModel.objects.create(
+                id=uuid4(),
+                service_request=sr,
+                status=opp_status.value,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            access = OpportunityAccessModel.objects.create(
+                id=uuid4(),
+                opportunity=opp,
+                provider_id=provider_id,
+                created_at=datetime.now(timezone.utc),
+            )
+            return access
+
+        # Create accesses for Provider A: OPEN, CLOSED, CANCELLED
+        acc_open = make_access(self.provider_a.id, OpportunityStatus.OPEN)
+        acc_closed = make_access(self.provider_a.id, OpportunityStatus.CLOSED)
+        acc_cancelled = make_access(self.provider_a.id, OpportunityStatus.CANCELLED)
+
+        # Create accesses for Provider B: OPEN
+        acc_b = make_access(self.provider_b.id, OpportunityStatus.OPEN)
+
+        # 1. returns only accesses owned by provider / cross-provider excluded / count provider-scoped
+        items, total = self.access_repository.list_unlocked_items_by_provider_paginated(
+            provider_id=self.provider_a.id,
+            page=1,
+            page_size=20,
+        )
+        self.assertEqual(total, 3)
+        self.assertEqual(len(items), 3)
+        # Ensure B is excluded
+        self.assertNotIn(acc_b.id, {it.opportunity_id for it in items})
+
+        # 2. deterministic ordering (newest entitlement timestamp first: acc_cancelled, then acc_closed, then acc_open)
+        self.assertEqual(items[0].opportunity_id, acc_cancelled.opportunity_id)
+        self.assertEqual(items[1].opportunity_id, acc_closed.opportunity_id)
+        self.assertEqual(items[2].opportunity_id, acc_open.opportunity_id)
+
+        # 3. OPEN, CLOSED, CANCELLED opportunities included
+        statuses = {it.status for it in items}
+        self.assertEqual(statuses, {OpportunityStatus.OPEN, OpportunityStatus.CLOSED, OpportunityStatus.CANCELLED})
+
+        # 4. no requester PII projection (must not have requester_name, requester_email, requester_phone as properties)
+        for item in items:
+            self.assertFalse(hasattr(item, "requester_name"))
+            self.assertFalse(hasattr(item, "requester_email"))
+            self.assertFalse(hasattr(item, "requester_phone"))
+
+        # 5. database pagination
+        items_p, total_p = self.access_repository.list_unlocked_items_by_provider_paginated(
+            provider_id=self.provider_a.id,
+            page=2,
+            page_size=2,
+        )
+        self.assertEqual(total_p, 3)
+        self.assertEqual(len(items_p), 1)
+        self.assertEqual(items_p[0].opportunity_id, acc_open.opportunity_id)
+
+        # 6. N+1 regression
+        # Clear accesses
+        OpportunityAccessModel.objects.all().delete()
+
+        # Measure queries for 1 item vs 10 items
+        # Let's pre-create them
+        for _ in range(10):
+            make_access(self.provider_a.id, OpportunityStatus.OPEN)
+
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        with CaptureQueriesContext(connection) as ctx_1:
+            self.access_repository.list_unlocked_items_by_provider_paginated(
+                provider_id=self.provider_a.id,
+                page=1,
+                page_size=1,
+            )
+
+        with CaptureQueriesContext(connection) as ctx_10:
+            self.access_repository.list_unlocked_items_by_provider_paginated(
+                provider_id=self.provider_a.id,
+                page=1,
+                page_size=10,
+            )
+
+        # Bounded query growth: query count for 10 items must equal query count for 1 item (per-item query growth = 0)
+        self.assertEqual(
+            len(ctx_1.captured_queries),
+            len(ctx_10.captured_queries),
+            f"Repository N+1: queries for 1 item ({len(ctx_1.captured_queries)}) != queries for 10 items ({len(ctx_10.captured_queries)})"
+        )
+
+
+class DjangoProtectedDataReadAuditWriterTests(TestCase):
+    def setUp(self):
+        self.writer = DjangoProtectedDataReadAuditWriter()
+        OpportunityContactReadAuditModel.objects.all().delete()
+
+    def test_record_contact_read_persists(self):
+        user_id = uuid4()
+        provider_id = uuid4()
+        opportunity_id = uuid4()
+        service_request_id = uuid4()
+
+        self.writer.record_contact_read(
+            authenticated_user_id=user_id,
+            provider_id=provider_id,
+            opportunity_id=opportunity_id,
+            service_request_id=service_request_id,
+        )
+
+        audits = list(OpportunityContactReadAuditModel.objects.all())
+        self.assertEqual(len(audits), 1)
+        audit = audits[0]
+        self.assertEqual(audit.authenticated_user_id, user_id)
+        self.assertEqual(audit.provider_id, provider_id)
+        self.assertEqual(audit.opportunity_id, opportunity_id)
+        self.assertEqual(audit.service_request_id, service_request_id)
+        self.assertEqual(audit.action, "marketplace.protected_contact.read")
+        self.assertIsNotNone(audit.created_at)
+
+    def test_record_multiple_reads_persists_independently(self):
+        user_id = uuid4()
+        provider_id = uuid4()
+        opportunity_id = uuid4()
+        service_request_id = uuid4()
+
+        self.writer.record_contact_read(
+            authenticated_user_id=user_id,
+            provider_id=provider_id,
+            opportunity_id=opportunity_id,
+            service_request_id=service_request_id,
+        )
+        self.writer.record_contact_read(
+            authenticated_user_id=user_id,
+            provider_id=provider_id,
+            opportunity_id=opportunity_id,
+            service_request_id=service_request_id,
+        )
+
+        self.assertEqual(OpportunityContactReadAuditModel.objects.count(), 2)
+
+    def test_pii_data_minimization_verified(self):
+        # Inspect that the model fields do NOT contain requester name, email, or phone.
+        fields = {f.name for f in OpportunityContactReadAuditModel._meta.get_fields()}
+        self.assertNotIn("requester_name", fields)
+        self.assertNotIn("requester_email", fields)
+        self.assertNotIn("requester_phone", fields)
+        self.assertNotIn("name", fields)
+        self.assertNotIn("email", fields)
+        self.assertNotIn("phone", fields)
+
 
 class DjangoOpportunityInvitationRepositoryTests(TestCase):
     def setUp(self):
@@ -1844,6 +2017,98 @@ class DjangoOpportunityInvitationRepositoryTests(TestCase):
         self.invitation_repository.save(inv)
         with self.assertRaises(ProtectedError):
             ProviderModel.objects.get(id=self.provider_model_a.id).delete()
+
+    def test_list_inbox_items_by_provider_paginated_with_status_filter(self):
+        OpportunityInvitationModel.objects.all().delete()
+        OpportunityModel.objects.all().delete()
+        ServiceRequestModel.objects.all().delete()
+
+        from src.marketplace.domain.entities import OpportunityStatus
+
+        def make_invitation(provider_model, status):
+            sr = ServiceRequestModel.objects.create(
+                id=uuid4(),
+                organization=self.org_model,
+                service=self.service_model,
+                title="SR",
+                description="desc",
+                status=ServiceRequestModel.Status.OPEN,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            opp = OpportunityModel.objects.create(
+                id=uuid4(),
+                service_request=sr,
+                status=status.value,
+                max_accesses=3,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            inv = OpportunityInvitationModel.objects.create(
+                id=uuid4(),
+                opportunity=opp,
+                provider_id=provider_model.id,
+                created_at=datetime.now(timezone.utc),
+            )
+            return inv
+
+        # Provider A: 4 OPEN, 3 CLOSED, 2 CANCELLED
+        for _ in range(4):
+            make_invitation(self.provider_model_a, OpportunityStatus.OPEN)
+        for _ in range(3):
+            make_invitation(self.provider_model_a, OpportunityStatus.CLOSED)
+        for _ in range(2):
+            make_invitation(self.provider_model_a, OpportunityStatus.CANCELLED)
+
+        # Provider B: 5 OPEN
+        for _ in range(5):
+            make_invitation(self.provider_model_b, OpportunityStatus.OPEN)
+
+        # Provider A + OPEN -> exactly A's 4 OPEN
+        items_open, total_open = self.invitation_repository.list_inbox_items_by_provider_paginated(
+            provider_id=self.provider_model_a.id,
+            page=1,
+            page_size=20,
+            status=OpportunityStatus.OPEN,
+        )
+        self.assertEqual(len(items_open), 4)
+        self.assertEqual(total_open, 4)
+        for item in items_open:
+            self.assertEqual(item.status, OpportunityStatus.OPEN)
+
+        # Provider A + CLOSED -> exactly A's 3 CLOSED
+        items_closed, total_closed = self.invitation_repository.list_inbox_items_by_provider_paginated(
+            provider_id=self.provider_model_a.id,
+            page=1,
+            page_size=20,
+            status=OpportunityStatus.CLOSED,
+        )
+        self.assertEqual(len(items_closed), 3)
+        self.assertEqual(total_closed, 3)
+        for item in items_closed:
+            self.assertEqual(item.status, OpportunityStatus.CLOSED)
+
+        # Provider A + CANCELLED -> exactly A's 2 CANCELLED
+        items_cancelled, total_cancelled = self.invitation_repository.list_inbox_items_by_provider_paginated(
+            provider_id=self.provider_model_a.id,
+            page=1,
+            page_size=20,
+            status=OpportunityStatus.CANCELLED,
+        )
+        self.assertEqual(len(items_cancelled), 2)
+        self.assertEqual(total_cancelled, 2)
+        for item in items_cancelled:
+            self.assertEqual(item.status, OpportunityStatus.CANCELLED)
+
+        # Provider A + None -> all 9
+        items_all, total_all = self.invitation_repository.list_inbox_items_by_provider_paginated(
+            provider_id=self.provider_model_a.id,
+            page=1,
+            page_size=20,
+            status=None,
+        )
+        self.assertEqual(len(items_all), 9)
+        self.assertEqual(total_all, 9)
 
 
 class DjangoOpportunityInterestRepositoryTests(TestCase):
@@ -2642,3 +2907,360 @@ class DjangoCreditSettlementAtomicWriterTests(TestCase):
 
         with self.assertRaises(ValueError):
             self.writer.persist(debit_entry=None, settlement=settlement, wallet_id=self.wallet.id, required_units=0)
+
+
+class DjangoOpportunityUnlockAtomicWriterTests(TestCase):
+    def setUp(self):
+        self.wallet_repository = DjangoCreditWalletRepository()
+        self.ledger_repository = DjangoCreditLedgerEntryRepository()
+        self.access_repository = DjangoOpportunityAccessRepository()
+        self.writer = DjangoOpportunityUnlockAtomicWriter()
+
+        self.org_id = uuid4()
+        self.org_model = OrganizationModel.objects.create(
+            id=self.org_id,
+            name="Org Atomic Test",
+            slug="org-atomic-test",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        now = datetime.now(timezone.utc)
+        self.wallet = CreditWallet(
+            id=uuid4(),
+            organization_id=self.org_id,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
+        self.wallet_repository.save(self.wallet)
+
+        self.ledger_repository.save(
+            CreditLedgerEntry(
+                id=uuid4(),
+                wallet_id=self.wallet.id,
+                direction=CreditLedgerDirection.CREDIT,
+                units=100,
+                reason="Load",
+                reference=None,
+                created_at=now,
+            )
+        )
+
+        self.cat_model = ServiceCategoryModel.objects.create(
+            id=uuid4(), name="Cat", slug="cat", is_active=True, created_at=now, updated_at=now
+        )
+        self.service_model = ServiceModel.objects.create(
+            id=uuid4(), category=self.cat_model, name="Service", slug="service", is_active=True, created_at=now, updated_at=now
+        )
+        self.request_model = ServiceRequestModel.objects.create(
+            id=uuid4(), organization=self.org_model, service=self.service_model, title="Title", description="desc", status="open", created_at=now, updated_at=now
+        )
+        self.opportunity_model = OpportunityModel.objects.create(
+            id=uuid4(), service_request=self.request_model, status="open", max_accesses=3, created_at=now, updated_at=now
+        )
+        self.provider_model = ProviderModel.objects.create(
+            id=uuid4(), organization=self.org_model, display_name="Prov", slug="prov", description="desc", is_active=True, created_at=now, updated_at=now
+        )
+        self.invitation_model = OpportunityInvitationModel.objects.create(
+            id=uuid4(), opportunity=self.opportunity_model, provider=self.provider_model, created_at=now
+        )
+
+    def test_atomic_persist_unlock_success(self):
+        now = datetime.now(timezone.utc)
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=self.invitation_model.id,
+            created_at=now,
+        )
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=f"opportunity-interest:{interest.id}",
+            created_at=now,
+        )
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=now,
+        )
+        access = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=self.opportunity_model.id,
+            provider_id=self.provider_model.id,
+            created_at=now,
+        )
+
+        self.writer.persist_unlock(
+            interest=interest,
+            debit_entry=debit,
+            settlement=settlement,
+            access=access,
+            wallet_id=self.wallet.id,
+            required_units=25,
+        )
+
+        # Verify all saved
+        self.assertIsNotNone(self.ledger_repository.get_by_id(debit.id))
+        self.assertEqual(EconomicSettlementModel.objects.filter(id=settlement.id).count(), 1)
+        self.assertEqual(OpportunityAccessModel.objects.filter(id=access.id).count(), 1)
+        self.assertEqual(OpportunityInterestModel.objects.filter(id=interest.id).count(), 1)
+
+    def test_atomic_rollback_on_integrity_error(self):
+        now = datetime.now(timezone.utc)
+        interest = OpportunityInterest(
+            id=uuid4(),
+            invitation_id=self.invitation_model.id,
+            created_at=now,
+        )
+        debit = CreditLedgerEntry(
+            id=uuid4(),
+            wallet_id=self.wallet.id,
+            direction=CreditLedgerDirection.DEBIT,
+            units=25,
+            reason="Debit",
+            reference=f"opportunity-interest:{interest.id}",
+            created_at=now,
+        )
+        settlement = EconomicSettlement(
+            id=uuid4(),
+            interest_id=interest.id,
+            method=SettlementMethod.CREDIT,
+            amount=Money(2500, "BRL"),
+            created_at=now,
+        )
+
+        # Pre-create access model in DB to trigger integrity error (duplicate unique constraint)
+        OpportunityAccessModel.objects.create(
+            id=uuid4(),
+            opportunity=self.opportunity_model,
+            provider=self.provider_model,
+            created_at=now,
+        )
+
+        access_duplicate = OpportunityAccess(
+            id=uuid4(),
+            opportunity_id=self.opportunity_model.id,
+            provider_id=self.provider_model.id,
+            created_at=now,
+        )
+
+        from django.db import IntegrityError
+        # Try to persist - should fail due to uniqueness of (opportunity, provider) on access table
+        with self.assertRaises((IntegrityError, ValueError)):
+            self.writer.persist_unlock(
+                interest=interest,
+                debit_entry=debit,
+                settlement=settlement,
+                access=access_duplicate,
+                wallet_id=self.wallet.id,
+                required_units=25,
+            )
+
+        # Verify rollback - debit, settlement, and interest must NOT be saved
+        self.assertIsNone(self.ledger_repository.get_by_id(debit.id))
+        self.assertEqual(EconomicSettlementModel.objects.filter(id=settlement.id).count(), 0)
+        self.assertEqual(OpportunityInterestModel.objects.filter(id=interest.id).count(), 0)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 01Y — DjangoOrganizationMemberProviderResolver integration tests
+# ---------------------------------------------------------------------------
+
+from django.contrib.auth import get_user_model
+
+from src.marketplace.application.use_cases import (
+    AmbiguousProviderIdentity,
+    ProviderIdentityNotFound,
+)
+from src.marketplace.infrastructure.django.repositories import (
+    DjangoOrganizationMemberProviderResolver,
+)
+from src.memberships.infrastructure.django.memberships.models import MembershipModel
+
+
+class DjangoOrganizationMemberProviderResolverTests(TestCase):
+    """
+    Integration tests for DjangoOrganizationMemberProviderResolver.
+
+    These tests exercise the real Django ORM queries against the test database
+    to verify the User → Membership → Organization → Provider resolution chain.
+    """
+
+    def setUp(self):
+        self.UserModel = get_user_model()
+        self.resolver = DjangoOrganizationMemberProviderResolver()
+        self.now = datetime.now(timezone.utc)
+
+    def _create_user(self):
+        uid = uuid4()
+        return self.UserModel.objects.create_user(
+            username=f"user-{uid.hex[:8]}",
+            email=f"{uid.hex[:8]}@test.com",
+            password="pass",
+        )
+
+    def _create_org(self):
+        return OrganizationModel.objects.create(
+            id=uuid4(),
+            name=f"Org {uuid4().hex[:6]}",
+            slug=f"org-{uuid4().hex[:8]}",
+            is_active=True,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+    def _create_provider(self, org, *, is_active: bool = True):
+        return ProviderModel.objects.create(
+            id=uuid4(),
+            organization=org,
+            display_name=f"Provider {uuid4().hex[:6]}",
+            slug=f"prov-{uuid4().hex[:8]}",
+            description="",
+            is_active=is_active,
+            created_at=self.now,
+            updated_at=self.now,
+        )
+
+    def _create_membership(self, user, org, *, is_active: bool = True):
+        return MembershipModel.objects.create(
+            id=uuid4(),
+            user=user,
+            organization=org,
+            role="member",
+            is_active=is_active,
+        )
+
+    # -----------------------------------------------------------------------
+
+    def test_single_active_provider_resolves_correctly(self):
+        """Happy path: User → active Membership → Org → 1 active Provider."""
+        user = self._create_user()
+        org = self._create_org()
+        provider_model = self._create_provider(org)
+        self._create_membership(user, org)
+
+        result = self.resolver.resolve(authenticated_user_id=user.id)
+
+        self.assertIsInstance(result, Provider)
+        self.assertEqual(result.id, provider_model.id)
+        self.assertEqual(result.organization_id, org.id)
+        self.assertTrue(result.is_active)
+
+    def test_user_without_memberships_raises_provider_identity_not_found(self):
+        """User with no membership records cannot resolve identity."""
+        user = self._create_user()
+        # No memberships created
+
+        with self.assertRaises(ProviderIdentityNotFound):
+            self.resolver.resolve(authenticated_user_id=user.id)
+
+    def test_user_with_inactive_membership_only_raises_provider_identity_not_found(self):
+        """Inactive membership must not be used for identity resolution."""
+        user = self._create_user()
+        org = self._create_org()
+        self._create_provider(org)
+        self._create_membership(user, org, is_active=False)
+
+        with self.assertRaises(ProviderIdentityNotFound):
+            self.resolver.resolve(authenticated_user_id=user.id)
+
+    def test_membership_to_org_without_provider_raises_provider_identity_not_found(self):
+        """Active membership but no Provider under the org."""
+        user = self._create_user()
+        org = self._create_org()
+        self._create_membership(user, org)
+        # No provider created under org
+
+        with self.assertRaises(ProviderIdentityNotFound):
+            self.resolver.resolve(authenticated_user_id=user.id)
+
+    def test_membership_to_org_with_inactive_provider_resolves_identity(self):
+        """
+        Active Membership + inactive Provider → identity RESOLVES.
+
+        Provider.is_active is an operational eligibility flag — it does NOT
+        block identity resolution.  A user with an active Membership that links
+        to an org with an inactive Provider still "is" that Provider for
+        historical entitlement reads (e.g., protected contact retrieval).
+
+        Operational restrictions (new unlock, etc.) are enforced separately
+        by the façade before delegating to economic use cases.
+        """
+        user = self._create_user()
+        org = self._create_org()
+        inactive_provider = self._create_provider(org, is_active=False)
+        self._create_membership(user, org)
+
+        result = self.resolver.resolve(authenticated_user_id=user.id)
+
+        self.assertIsInstance(result, Provider)
+        self.assertEqual(result.id, inactive_provider.id)
+        self.assertFalse(result.is_active)
+
+    def test_inactive_provider_in_second_org_causes_ambiguity_with_active_in_first(self):
+        """
+        User member of two orgs: one has active Provider, other has inactive.
+        Both providers are returned since Provider.is_active does NOT filter
+        during identity resolution.  With two providers found → AmbiguousProviderIdentity.
+        """
+        user = self._create_user()
+        org1, org2 = self._create_org(), self._create_org()
+        self._create_provider(org1)
+        self._create_provider(org2, is_active=False)
+        self._create_membership(user, org1)
+        self._create_membership(user, org2)
+
+        with self.assertRaises(AmbiguousProviderIdentity):
+            self.resolver.resolve(authenticated_user_id=user.id)
+
+    def test_two_active_providers_in_same_org_raises_ambiguous_provider_identity(self):
+        """Multiple active Providers under the same org → AmbiguousProviderIdentity."""
+        user = self._create_user()
+        org = self._create_org()
+        self._create_provider(org)
+        self._create_provider(org)
+        self._create_membership(user, org)
+
+        with self.assertRaises(AmbiguousProviderIdentity):
+            self.resolver.resolve(authenticated_user_id=user.id)
+
+    def test_two_active_providers_across_different_orgs_raises_ambiguous_provider_identity(self):
+        """User member of two orgs, each with one Provider → AmbiguousProviderIdentity."""
+        user = self._create_user()
+        org1, org2 = self._create_org(), self._create_org()
+        self._create_provider(org1)
+        self._create_provider(org2)
+        self._create_membership(user, org1)
+        self._create_membership(user, org2)
+
+        with self.assertRaises(AmbiguousProviderIdentity):
+            self.resolver.resolve(authenticated_user_id=user.id)
+
+    def test_resolver_does_not_cross_user_boundaries(self):
+        """
+        User A's provider must not be resolvable by User B.
+        """
+        user_a = self._create_user()
+        user_b = self._create_user()
+        org = self._create_org()
+        self._create_provider(org)
+        self._create_membership(user_a, org)
+        # user_b has no membership
+
+        result = self.resolver.resolve(authenticated_user_id=user_a.id)
+        self.assertIsNotNone(result)
+
+        with self.assertRaises(ProviderIdentityNotFound):
+            self.resolver.resolve(authenticated_user_id=user_b.id)
+
+    def test_nonexistent_user_id_raises_provider_identity_not_found(self):
+        """Completely unknown UUID raises ProviderIdentityNotFound."""
+        with self.assertRaises(ProviderIdentityNotFound):
+            self.resolver.resolve(authenticated_user_id=uuid4())

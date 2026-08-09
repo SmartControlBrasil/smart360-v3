@@ -14,6 +14,12 @@ from src.marketplace.application.ports import (
     CreditWalletRepository,
     CreditLedgerEntryRepository,
     CreditSettlementAtomicWriter,
+    OpportunityUnlockAtomicWriter,
+    ProtectedDataReadAuditWriter,
+)
+from src.marketplace.application.use_cases import (
+    AmbiguousProviderIdentity,
+    ProviderIdentityNotFound,
 )
 from src.marketplace.domain.entities import (
     Opportunity,
@@ -33,6 +39,8 @@ from src.marketplace.domain.entities import (
     CreditWallet,
     CreditLedgerDirection,
     CreditLedgerEntry,
+    ProviderOpportunityInboxItem,
+    ProviderUnlockedOpportunityItem,
 )
 from src.marketplace.infrastructure.django.marketplace.models import (
     OpportunityAccessModel,
@@ -47,7 +55,9 @@ from src.marketplace.infrastructure.django.marketplace.models import (
     EconomicSettlementModel,
     CreditWalletModel,
     CreditLedgerEntryModel,
+    OpportunityContactReadAuditModel,
 )
+from src.memberships.infrastructure.django.memberships.models import MembershipModel
 
 
 class DjangoServiceCategoryRepository(ServiceCategoryRepository):
@@ -488,6 +498,44 @@ class DjangoOpportunityAccessRepository(OpportunityAccessRepository):
             opportunity_id=opportunity_id,
         ).count()
 
+    def list_unlocked_items_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[ProviderUnlockedOpportunityItem], int]:
+        queryset = OpportunityAccessModel.objects.filter(
+            provider_id=provider_id,
+        )
+
+        queryset = queryset.select_related(
+            "opportunity",
+            "opportunity__service_request",
+        ).order_by("-created_at", "-id")
+
+        total_items = queryset.count()
+        offset = (page - 1) * page_size
+        models = queryset[offset : offset + page_size]
+
+        items: list[ProviderUnlockedOpportunityItem] = []
+        for m in models:
+            opp_model = m.opportunity
+            sr_model = opp_model.service_request
+            items.append(
+                ProviderUnlockedOpportunityItem(
+                    opportunity_id=opp_model.id,
+                    service_request_id=sr_model.id,
+                    service_id=sr_model.service_id,
+                    title=sr_model.title,
+                    description=sr_model.description,
+                    status=OpportunityStatus(opp_model.status),
+                    unlocked_at=m.created_at,
+                )
+            )
+
+        return items, total_items
+
 
 class DjangoOpportunityInvitationRepository(OpportunityInvitationRepository):
     @staticmethod
@@ -548,6 +596,64 @@ class DjangoOpportunityInvitationRepository(OpportunityInvitationRepository):
             provider_id=provider_id,
         ).order_by("created_at", "id")
         return [self._to_entity(model) for model in models]
+
+    def list_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[OpportunityInvitation], int]:
+        queryset = OpportunityInvitationModel.objects.filter(
+            provider_id=provider_id,
+        ).order_by("-created_at", "-id")
+        total_items = queryset.count()
+        offset = (page - 1) * page_size
+        models = queryset[offset : offset + page_size]
+        return [self._to_entity(model) for model in models], total_items
+
+    def list_inbox_items_by_provider_paginated(
+        self,
+        *,
+        provider_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+        status: OpportunityStatus | None = None,
+    ) -> tuple[list[ProviderOpportunityInboxItem], int]:
+        queryset = OpportunityInvitationModel.objects.filter(
+            provider_id=provider_id,
+        )
+
+        if status is not None:
+            queryset = queryset.filter(opportunity__status=status.value)
+
+        queryset = queryset.select_related(
+            "opportunity",
+            "opportunity__service_request",
+        ).order_by("-created_at", "-id")
+
+        total_items = queryset.count()
+        offset = (page - 1) * page_size
+        models = queryset[offset : offset + page_size]
+
+        items: list[ProviderOpportunityInboxItem] = []
+        for m in models:
+            opp_model = m.opportunity
+            sr_model = opp_model.service_request
+            items.append(
+                ProviderOpportunityInboxItem(
+                    invitation_id=m.id,
+                    opportunity_id=opp_model.id,
+                    service_request_id=sr_model.id,
+                    service_id=sr_model.service_id,
+                    title=sr_model.title,
+                    description=sr_model.description,
+                    status=OpportunityStatus(opp_model.status),
+                    created_at=m.created_at,
+                )
+            )
+
+        return items, total_items
 
     def count_by_opportunity(self, opportunity_id: UUID) -> int:
         return OpportunityInvitationModel.objects.filter(
@@ -759,3 +865,195 @@ class DjangoCreditSettlementAtomicWriter(CreditSettlementAtomicWriter):
                 currency=settlement.amount.currency,
                 created_at=settlement.created_at,
             )
+
+
+class DjangoOpportunityUnlockAtomicWriter(OpportunityUnlockAtomicWriter):
+    def persist_unlock(
+        self,
+        *,
+        interest: OpportunityInterest,
+        debit_entry: CreditLedgerEntry | None,
+        settlement: EconomicSettlement,
+        access: OpportunityAccess,
+        wallet_id: UUID,
+        required_units: int,
+    ) -> None:
+        from django.db import transaction
+        from src.marketplace.infrastructure.django.marketplace.models import (
+            CreditWalletModel,
+            CreditLedgerEntryModel,
+            EconomicSettlementModel,
+            OpportunityAccessModel,
+            OpportunityInterestModel,
+        )
+
+        with transaction.atomic():
+            # 1. select_for_update CreditWallet row to enforce concurrency safety
+            wallet_model = CreditWalletModel.objects.select_for_update().get(id=wallet_id)
+            if not wallet_model.is_active:
+                raise ValueError("Wallet is inactive inside transactional verification.")
+
+            # 2. Check if OpportunityAccess already exists under lock (to prevent concurrent race condition)
+            if OpportunityAccessModel.objects.filter(opportunity_id=access.opportunity_id, provider_id=access.provider_id).exists():
+                raise ValueError("OpportunityAccess already exists.")
+
+            # 3. Create/get OpportunityInterest
+            interest_model, interest_created = OpportunityInterestModel.objects.get_or_create(
+                id=interest.id,
+                defaults={
+                    "invitation_id": interest.invitation_id,
+                    "created_at": interest.created_at,
+                }
+            )
+
+            # 4. Authoritative balance check from DB rows under lock
+            if required_units > 0:
+                # Check if this interest already has a ledger entry (idempotency check)
+                ref = f"opportunity-interest:{interest.id}"
+                if not CreditLedgerEntryModel.objects.filter(reference=ref).exists():
+                    entries = CreditLedgerEntryModel.objects.filter(wallet_id=wallet_id)
+                    balance = 0
+                    for entry_model in entries:
+                        if entry_model.direction == "credit":
+                            balance += entry_model.units
+                        elif entry_model.direction == "debit":
+                            balance -= entry_model.units
+
+                    if required_units > balance:
+                        raise ValueError("Insufficient wallet credit balance under row lock.")
+
+                    # Create debit entry
+                    CreditLedgerEntryModel.objects.create(
+                        id=debit_entry.id,
+                        wallet_id=debit_entry.wallet_id,
+                        direction=debit_entry.direction.value,
+                        units=debit_entry.units,
+                        reason=debit_entry.reason,
+                        reference=debit_entry.reference,
+                        created_at=debit_entry.created_at,
+                    )
+
+            # 5. Create EconomicSettlement if not exists
+            EconomicSettlementModel.objects.get_or_create(
+                id=settlement.id,
+                defaults={
+                    "interest_id": settlement.interest_id,
+                    "method": settlement.method.value,
+                    "amount_minor": settlement.amount.amount_minor,
+                    "currency": settlement.amount.currency,
+                    "created_at": settlement.created_at,
+                }
+            )
+
+            # 6. Create OpportunityAccess
+            OpportunityAccessModel.objects.create(
+                id=access.id,
+                opportunity_id=access.opportunity_id,
+                provider_id=access.provider_id,
+                created_at=access.created_at,
+            )
+
+
+class DjangoOrganizationMemberProviderResolver:
+    """
+    Django infrastructure adapter for ProviderIdentityResolver.
+
+    Resolution path:
+        User (authenticated_user_id)
+            → active MembershipModel records
+            → organization_ids
+            → active ProviderModel records
+            → Provider domain entity
+
+    Raises:
+        ProviderIdentityNotFound:
+            - User has no active memberships.
+            - Organizations linked to the user have no active providers.
+        AmbiguousProviderIdentity:
+            - More than one active Provider found across all member orgs.
+              A future explicit-selection mechanism is required.
+        RuntimeError:
+            Propagated as-is for unexpected infrastructure failures.
+
+    This class knows about:
+        - Django ORM (MembershipModel, ProviderModel)
+        - UUID as primary key type
+
+    This class does NOT know about:
+        - HttpRequest / request.user
+        - Django auth middleware
+        - Session state
+    """
+
+    def resolve(
+        self,
+        *,
+        authenticated_user_id: UUID,
+    ) -> Provider:
+        """
+        Resolve the authenticated user's unique Provider identity.
+
+        All DB queries use only active records to prevent access via
+        deactivated memberships or deactivated providers.
+        """
+        # Step 1: find active memberships for this user
+        membership_org_ids = list(
+            MembershipModel.objects.filter(
+                user_id=authenticated_user_id,
+                is_active=True,
+            ).values_list("organization_id", flat=True)
+        )
+        if not membership_org_ids:
+            raise ProviderIdentityNotFound(
+                f"User {authenticated_user_id} has no active memberships."
+            )
+
+        # Step 2: find providers linked to those organizations.
+        # Provider.is_active is an *operational eligibility* flag — it does NOT
+        # block identity resolution.  A user with an active Membership to an org
+        # that has an inactive Provider still "is" that Provider for the purpose
+        # of historical entitlement reads (e.g. contact retrieval).
+        # Operational restrictions (new unlock, etc.) are enforced separately.
+        provider_models = list(
+            ProviderModel.objects.filter(
+                organization_id__in=membership_org_ids,
+            )
+        )
+        if not provider_models:
+            raise ProviderIdentityNotFound(
+                f"User {authenticated_user_id} has active memberships but no "
+                "Provider found in the linked organizations."
+            )
+
+        # Step 3: guard against ambiguity — safe by default
+        if len(provider_models) > 1:
+            provider_ids = [str(p.id) for p in provider_models]
+            raise AmbiguousProviderIdentity(
+                f"User {authenticated_user_id} maps to multiple active Providers "
+                f"({', '.join(provider_ids)}). "
+                "Explicit Provider selection is required."
+            )
+
+        return DjangoProviderRepository._to_entity(provider_models[0])
+
+
+class DjangoProtectedDataReadAuditWriter(ProtectedDataReadAuditWriter):
+    def record_contact_read(
+        self,
+        *,
+        authenticated_user_id: UUID,
+        provider_id: UUID,
+        opportunity_id: UUID,
+        service_request_id: UUID,
+    ) -> None:
+        import uuid
+        from django.utils import timezone
+        OpportunityContactReadAuditModel.objects.create(
+            id=uuid.uuid4(),
+            authenticated_user_id=authenticated_user_id,
+            provider_id=provider_id,
+            opportunity_id=opportunity_id,
+            service_request_id=service_request_id,
+            action="marketplace.protected_contact.read",
+            created_at=timezone.now(),
+        )
